@@ -65,8 +65,86 @@ public final class CueBuilder {
         return cues;
     }
 
-    static String clean(final String rawText) {
-        if (rawText == null) {
+    /** One timed word from whisper's word-level timestamps. */
+    public record WordSpan(String word, double start, double end) {
+    }
+
+    /** Break cue grouping when the next word waits longer than this. */
+    private static final double PAUSE_BREAK_SEC = 0.6;
+    /** Short word-timed cues are held up to this long so fast phrases do not
+     * flash; never past the next cue's start. */
+    private static final double MIN_HOLD_SEC = 1.6;
+
+    /**
+     * Builds cues from whisper's word-level timestamps, so every cue is on
+     * screen exactly while the words it carries are being spoken. Words
+     * group into readable cues by size, duration, and natural pauses; the
+     * fallback in {@link #fromSegment} guesses interior timing by character
+     * count instead, which visibly drifts on the long segments cloud Whisper
+     * returns.
+     */
+    public static List<SubtitleCue> fromWords(final List<WordSpan> words) {
+        if (words == null || words.isEmpty()) {
+            return List.of();
+        }
+        final List<SubtitleCue> built = new ArrayList<>();
+        final StringBuilder text = new StringBuilder();
+        double groupStart = words.get(0).start();
+        double groupEnd = groupStart;
+        for (final WordSpan word : words) {
+            if (!text.isEmpty()
+                    && (text.length() >= MAX_CHARS
+                    || word.start() - groupEnd >= PAUSE_BREAK_SEC
+                    || word.end() - groupStart >= MAX_CUE_SECONDS)) {
+                final String cleaned = clean(text.toString());
+                if (!cleaned.isEmpty() && groupEnd > groupStart) {
+                    built.add(new SubtitleCue(groupStart, groupEnd, cleaned));
+                }
+                text.setLength(0);
+                groupStart = word.start();
+            }
+            appendWord(text, word.word());
+            groupEnd = Math.max(groupEnd, word.end());
+        }
+        final String cleaned = clean(text.toString());
+        if (!cleaned.isEmpty() && groupEnd > groupStart) {
+            built.add(new SubtitleCue(groupStart, groupEnd, cleaned));
+        }
+        // Hold briefly on very short cues; never past the next cue's start.
+        for (int i = 0; i < built.size(); i++) {
+            final SubtitleCue cue = built.get(i);
+            if (cue.duration() >= MIN_CUE_SECONDS) {
+                continue;
+            }
+            final double limit = i + 1 < built.size()
+                    ? Math.min(cue.start() + MIN_HOLD_SEC, built.get(i + 1).start() - 0.02)
+                    : cue.start() + MIN_HOLD_SEC;
+            if (limit > cue.end()) {
+                built.set(i, new SubtitleCue(cue.start(), limit, cue.text()));
+            }
+        }
+        return built;
+    }
+
+    /** Appends one raw word, keeping the spacing whisper already embedded. */
+    private static void appendWord(final StringBuilder text, final String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        if (text.length() > 0) {
+            final char first = raw.charAt(0);
+            final boolean glued = Character.isWhitespace(first)
+                    || first == ',' || first == '.' || first == '!' || first == '?'
+                    || first == ';' || first == ':' || first == '…' || first == ')'
+                    || first == '\'' || first == '’';
+            if (!glued) {
+                text.append(' ');
+            }
+        }
+        text.append(raw);
+    }
+
+    static String clean(final String rawText) {        if (rawText == null) {
             return "";
         }
         String text = rawText

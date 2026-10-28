@@ -35,8 +35,9 @@ import java.util.logging.Logger;
  * limit, and consecutive chunks deliberately overlap: Whisper always hears
  * several seconds of context around every seam, so no word is cut off there.
  * Each chunk is posted as multipart form data with
- * {@code response_format=verbose_json} so segments carry chunk-relative
- * timestamps. Cue transcription ownership is a clean partition by chunk file
+ * {@code response_format=verbose_json} and word granularities, so segments
+ * carry chunk-relative timestamps and every word its own start/end: cue
+ * timing comes from the words a cue shows, not from a split guess. Cue transcription ownership is a clean partition by chunk file
  * ends: each chunk keeps only segments starting after the previous chunk's
  * file ends, which hands the seam region to the previous chunk (whose
  * transcription of that audio is anchored inside a stable file) and avoids
@@ -152,6 +153,17 @@ public final class GroqTranscriber {
         LOG.info("Groq returned " + cues.size() + " segment cue(s) from " + total
                 + " audio chunk(s)");
         cues.sort(SubtitleCue.byStart());
+        // Whisper's word timestamps can jitter: a word's end sometimes sits
+        // after the next word's start, and consecutive segments or chunks
+        // overlap a little. No cue may hold after the next one begins —
+        // overlays would favor the later cue and flicker the text.
+        for (int i = 0; i < cues.size() - 1; i++) {
+            final SubtitleCue cue = cues.get(i);
+            final double limit = cues.get(i + 1).start() - 0.02;
+            if (limit < cue.end() && limit > cue.start()) {
+                cues.set(i, new SubtitleCue(cue.start(), limit, cue.text()));
+            }
+        }
         return cues;
     }
 
@@ -208,6 +220,11 @@ public final class GroqTranscriber {
                         .setType(MultipartBody.FORM)
                         .addFormDataPart("model", MODEL_ID)
                         .addFormDataPart("response_format", "verbose_json")
+                        // Word timestamps give each word its real start/end so
+                        // cue text is timed by the words it shows; segments
+                        // still drive ownership and the seam bridge.
+                        .addFormDataPart("timestamp_granularities[]", "segment")
+                        .addFormDataPart("timestamp_granularities[]", "word")
                         .addFormDataPart("temperature", "0")
                         .addFormDataPart("file", "audio.m4a", fileBody);
                 if (prompt != null && !prompt.isBlank()) {
@@ -336,10 +353,12 @@ public final class GroqTranscriber {
         try {
             final JsonObject json = JsonParser.object().from(body);
             final JsonArray segments = json.getArray("segments");
+            final JsonArray words = json.getArray("words");
             if (verbose) {
                 LOG.info("Groq " + tag + ": offset=" + Fmt.time(offset) + " ownership from "
                         + (startFloorSec < 0 ? "00:00" : Fmt.time(startFloorSec))
                         + ", whisper duration=" + Fmt.time(json.getDouble("duration", -1))
+                        + ", words=" + (words == null ? "none" : String.valueOf(words.size()))
                         + ", text=" + clip(json.getString("text", ""), 40));
             }
             if (segments == null || segments.isEmpty()) {
@@ -385,12 +404,20 @@ public final class GroqTranscriber {
                     clipped = Math.min(clipped, firstOwnedStart - BRIDGE_GUARD_SEC);
                 }
                 if (!bridgeText.isEmpty() && clipped - startFloorSec >= BRIDGE_MIN_SPAN_SEC) {
+                    final List<dev.tubescribe.subs.CueBuilder.WordSpan> bridgeWords =
+                            wordSpans(words, offset, startFloorSec, clipped);
                     if (verbose) {
                         LOG.info("Groq " + tag + " bridge: " + Fmt.time(startFloorSec)
-                                + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160));
+                                + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160)
+                                + (bridgeWords.isEmpty() ? ""
+                                : " (" + bridgeWords.size() + " words)"));
                     }
-                    cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
-                            startFloorSec, clipped - startFloorSec, bridgeText));
+                    if (bridgeWords.isEmpty()) {
+                        cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
+                                startFloorSec, clipped - startFloorSec, bridgeText));
+                    } else {
+                        cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(bridgeWords));
+                    }
                     latestEnd = Math.max(latestEnd, clipped);
                 }
             }
@@ -414,9 +441,17 @@ public final class GroqTranscriber {
                 if (!owned || duplicate) {
                     continue;
                 }
-                // Split long segments so the subtitle overlay stays readable.
-                cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
-                        start, Math.max(end, start + 0.4) - start, text));
+                // The spoken words carry their own timestamps and drive cue
+                // timing directly; character-share splitting is only the
+                // fallback when whisper returned no word list.
+                final List<dev.tubescribe.subs.CueBuilder.WordSpan> segWords =
+                        wordSpans(words, offset, start - 0.02, end + 0.02);
+                if (segWords.isEmpty()) {
+                    cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
+                            start, Math.max(end, start + 0.4) - start, text));
+                } else {
+                    cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(segWords));
+                }
                 latestEnd = Math.max(latestEnd, end);
             }
         } catch (final com.grack.nanojson.JsonParserException e) {
@@ -429,6 +464,35 @@ public final class GroqTranscriber {
     private static String clip(final String text, final int max) {
         final String flat = text.replaceAll("\\s+", " ").strip();
         return flat.length() <= max ? flat : flat.substring(0, max) + "…";
+    }
+
+    /**
+     * Collects the chunk's word timestamps whose start lies inside
+     * {@code [from, to)}, shifted into the global timeline.
+     * @param words  the response's optional word list, or null
+     * @param offset global PTS of the chunk's first sample (seconds)
+     */
+    private static List<dev.tubescribe.subs.CueBuilder.WordSpan> wordSpans(
+            final JsonArray words, final double offset, final double from, final double to) {
+        final List<dev.tubescribe.subs.CueBuilder.WordSpan> out = new ArrayList<>();
+        if (words == null) {
+            return out;
+        }
+        for (int i = 0; i < words.size(); i++) {
+            final JsonObject word = words.getObject(i);
+            final double relStart = Math.max(0, word.getDouble("start", 0));
+            final double relEnd = Math.max(relStart, word.getDouble("end", relStart + 0.15));
+            final double start = offset + relStart;
+            final double end = offset + relEnd;
+            if (start < from - 0.02 || start >= to) {
+                continue;
+            }
+            final String raw = word.getString("word", "");
+            if (!raw.isEmpty()) {
+                out.add(new dev.tubescribe.subs.CueBuilder.WordSpan(raw, start, end));
+            }
+        }
+        return out;
     }
 
     /** Verbose segment logging only while the debug chunk limit is active. */
