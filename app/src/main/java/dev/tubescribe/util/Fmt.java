@@ -35,6 +35,24 @@ public final class Fmt {
         return String.format("%d:%02d", m, s);
     }
 
+    /**
+     * Player-bar position like {@code 03:36} or {@code 06:59}: zero-padded minutes,
+     * seconds truncated (not rounded) so the bar never shows the duration early.
+     */
+    public static String barClock(final double seconds) {
+        if (!Double.isFinite(seconds) || seconds < 0) {
+            return "00:00";
+        }
+        final long total = (long) Math.floor(seconds);
+        final long h = total / 3600;
+        final long m = (total % 3600) / 60;
+        final long s = total % 60;
+        if (h > 0) {
+            return String.format("%d:%02d:%02d", h, m, s);
+        }
+        return String.format("%02d:%02d", m, s);
+    }
+
     public static String bytes(final long value) {
         if (value < 1024) {
             return value + " B";

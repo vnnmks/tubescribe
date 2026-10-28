@@ -3,6 +3,7 @@ package dev.tubescribe.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -64,6 +65,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -472,8 +474,9 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                Fmt.clock((if (seeking) seekTargetMs else positionMs) / 1000.0),
-                                style = MaterialTheme.typography.labelSmall,
+                                Fmt.barClock((if (seeking) seekTargetMs else positionMs) / 1000.0),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Medium,
                                 color = Color.White
                             )
                             Slider(
@@ -489,26 +492,62 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 },
                                 valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)),
                                 colors = SliderDefaults.colors(
-                                    thumbColor = MaterialTheme.colorScheme.primary,
-                                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.35f)
+                                    thumbColor = Color.Red,
+                                    activeTrackColor = Color.Red,
+                                    inactiveTrackColor = Color.Red.copy(alpha = 0.4f)
                                 ),
                                 thumb = {
                                     SliderDefaults.Thumb(
                                         interactionSource = remember { MutableInteractionSource() },
                                         thumbSize = DpSize(12.dp, 12.dp),
                                         colors = SliderDefaults.colors(
-                                            thumbColor = MaterialTheme.colorScheme.primary
+                                            thumbColor = Color.Red
                                         )
                                     )
+                                },
+                                track = { sliderState ->
+                                    // Hairline red track, no stop dots, no thumb gap —
+                                    // matches the reference: 03:36 ———●——— 06:59.
+                                    val range = sliderState.valueRange
+                                    val fraction = if (range.endInclusive > range.start) {
+                                        ((sliderState.value - range.start) /
+                                            (range.endInclusive - range.start))
+                                            .coerceIn(0f, 1f)
+                                    } else {
+                                        0f
+                                    }
+                                    Canvas(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .height(3.dp)
+                                    ) {
+                                        val stroke = size.height
+                                        val y = size.height / 2f
+                                        drawLine(
+                                            color = Color.Red.copy(alpha = 0.4f),
+                                            start = Offset(0f, y),
+                                            end = Offset(size.width, y),
+                                            strokeWidth = stroke,
+                                            cap = StrokeCap.Round
+                                        )
+                                        drawLine(
+                                            color = Color.Red,
+                                            start = Offset(0f, y),
+                                            end = Offset(size.width * fraction, y),
+                                            strokeWidth = stroke,
+                                            cap = StrokeCap.Round
+                                        )
+                                    }
                                 },
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(24.dp)
+                                    .padding(horizontal = 6.dp)
                             )
                             Text(
-                                Fmt.clock(durationMs / 1000.0),
-                                style = MaterialTheme.typography.labelSmall,
+                                Fmt.barClock(durationMs / 1000.0),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Medium,
                                 color = Color.White
                             )
                         }
