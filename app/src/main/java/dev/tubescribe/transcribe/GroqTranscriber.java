@@ -126,21 +126,25 @@ public final class GroqTranscriber {
             }
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
                     prompt, keys, listener, i, total, cancel);
-            // Cue ownership by file-end partitioning: a chunk transcribes its
-            // own head overlap (the previous chunk's tail) plus its first in-
-            // territory window with unreliable timestamps — whisper orients
-            // over the first seconds of a file and, prompted by the previous
-            // chunk's tail text, smears several sentences into a stretched
-            // first segment there (measured ~30 s segments). The previous
-            // chunk heard that same audio from well inside a stable file, so
-            // it keeps the seam region, and this chunk's transcript is only
-            // trusted from where the previous chunk's file ends — except for
-            // a floor-dropped segment running past it, which bridges the
-            // gap left where the previous chunk's file ended mid-sentence
-            // (see parseCues).
-            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY
+            // Cue ownership for overlapping chunk geometry: partition by file
+            // ends — the previous chunk transcribed [offset, prev file end)
+            // from inside a stable file, while whisper orients over the first
+            // seconds of every file and, prompted by the previous chunk's
+            // tail text, smears several sentences into a stretched first
+            // segment there (measured ~30 s segments). So nothing before the
+            // previous chunk's file end is kept, except a floor-dropped
+            // segment running past it, which bridges the gap where the
+            // previous chunk's file ended mid-sentence (see parseCues).
+            // Back-to-back non-overlapping chunks leave every head wholly
+            // untranscribed by any neighbor, so keep everything.
+            final double prevFileEndSec = i == 0 ? Double.NEGATIVE_INFINITY
                     : (chunks.get(i - 1).startUs() + chunks.get(i - 1).durationUs())
                     / 1_000_000.0;
+            // A container's duration runs a sample frame past its nominal
+            // end, so detect overlap with a tolerance well above that yet
+            // far below the 20 s overlap window.
+            final double startFloorSec = prevFileEndSec > offset + 1.0
+                    ? prevFileEndSec : Double.NEGATIVE_INFINITY;
             acceptedEndSec = parseCues(body, offset, startFloorSec,
                     cues, acceptedEndSec, verbose, (i + 1) + "/" + total);
             prompt = promptTail(cues);

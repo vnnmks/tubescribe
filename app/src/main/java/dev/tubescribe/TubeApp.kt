@@ -94,10 +94,39 @@ object TubeApp {
         }
 
     /**
+     * "Overlap audio chunks" toggle on the home screen: when true (default),
+     * consecutive audio chunks share a seam window so whisper has context
+     * around every cut. Changing it drops cached transcripts so the next
+     * fetch transcribes with the new setting.
+     */
+    var chunkOverlap: Boolean
+        get() = prefs.getBoolean("chunk_overlap", true)
+        set(value) {
+            prefs.edit().putBoolean("chunk_overlap", value).apply()
+        }
+
+    /** Java access for the ported [dev.tubescribe.media.AudioChunker]. */
+    @JvmStatic
+    fun chunkOverlapEnabled(): Boolean = chunkOverlap
+
+    /**
+     * Drops every cached transcript (subtitles.srt) so the next fetch
+     * re-transcribes with the chunking settings now configured. Videos and
+     * metadata stay cached; transcription is only re-computed.
+     */
+    fun invalidateSubtitleCache() {
+        cacheDir.listFiles()?.forEach { dir ->
+            if (dir.isDirectory) {
+                File(dir, "subtitles.srt").delete()
+            }
+        }
+    }
+
+    /**
      * Debug-only override for the audio chunk byte limit (0 = production
      * limit). A small forced limit makes [dev.tubescribe.media.AudioChunker]
-     * split even short audio into many overlapping chunks, so the seam
-     * handling can be exercised on a short test video.
+     * split even short audio into many chunks, so seam handling can be
+     * exercised on a short test video.
      */
     @JvmStatic
     fun debugChunkLimit(): Long = prefs.getLong("debug_chunk_bytes", 0L)

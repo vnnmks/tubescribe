@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -71,6 +72,7 @@ fun HomeScreen(
     val clipboard = LocalClipboardManager.current
 
     var qualityName by rememberSaveable { mutableStateOf(TubeApp.lastQuality) }
+    var chunkOverlapOn by rememberSaveable { mutableStateOf(TubeApp.chunkOverlap) }
     var recent by remember { mutableStateOf<List<Pipeline.RecentVideo>>(emptyList()) }
     var showQualityMenu by remember { mutableStateOf(false) }
     val quality = Quality.fromName(qualityName, Quality.P720)
@@ -172,6 +174,34 @@ fun HomeScreen(
                 }
             }
 
+            val running = state is PipelineState.Running
+
+            Spacer(Modifier.height(10.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Overlap audio chunks", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "20 s of shared audio around each seam so no word at a cut " +
+                            "is lost. Off: chunks cut back-to-back, faster but seam " +
+                            "words can be mis-timed. Re-transcribes on next fetch.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = chunkOverlapOn,
+                    onCheckedChange = { checked ->
+                        chunkOverlapOn = checked
+                        TubeApp.chunkOverlap = checked
+                        TubeApp.invalidateSubtitleCache()
+                    },
+                    enabled = !running
+                )
+            }
+
             when (val current = state) {
                 is PipelineState.Running -> {
                     Column(Modifier.fillMaxWidth()) {
@@ -220,7 +250,6 @@ fun HomeScreen(
                 else -> Unit
             }
 
-            val running = state is PipelineState.Running
             Button(
                 onClick = { viewModel.start(url, quality) },
                 enabled = !running && url.isNotBlank(),
