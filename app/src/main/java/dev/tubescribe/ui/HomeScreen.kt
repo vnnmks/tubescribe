@@ -158,7 +158,7 @@ fun HomeScreen(
                         expanded = showQualityMenu,
                         onDismissRequest = { showQualityMenu = false }
                     ) {
-                        Quality.entries.forEach { option ->
+                        Quality.values().forEach { option ->
                             DropdownMenuItem(
                                 text = { Text(option.label()) },
                                 onClick = {

@@ -67,11 +67,29 @@ public final class SubtitleTrack {
     }
 
     public void writeSrt(final Path target) throws IOException {
-        Files.writeString(target, toSrt(), StandardCharsets.UTF_8);
+        writeUtf8(target, toSrt());
     }
 
     public void writeVtt(final Path target) throws IOException {
-        Files.writeString(target, toVtt(), StandardCharsets.UTF_8);
+        writeUtf8(target, toVtt());
+    }
+
+    private static void writeUtf8(final Path target, final String text) throws IOException {
+        try (java.io.OutputStream out = Files.newOutputStream(target)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static String readUtf8(final Path source) throws IOException {
+        final java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        try (java.io.InputStream in = Files.newInputStream(source)) {
+            final byte[] chunk = new byte[8192];
+            int read;
+            while ((read = in.read(chunk)) > 0) {
+                buffer.write(chunk, 0, read);
+            }
+        }
+        return new String(buffer.toByteArray(), StandardCharsets.UTF_8);
     }
 
     public String toSrt() {
@@ -96,7 +114,7 @@ public final class SubtitleTrack {
     }
 
     public static SubtitleTrack readSrt(final Path source) throws IOException {
-        final String text = Files.readString(source, StandardCharsets.UTF_8)
+        final String text = readUtf8(source)
                 .replace("\uFEFF", "")
                 .replace("\r\n", "\n")
                 .replace('\r', '\n');

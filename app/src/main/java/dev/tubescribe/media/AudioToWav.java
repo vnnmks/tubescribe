@@ -4,7 +4,6 @@ import android.media.AudioFormat;
 import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
-import android.media.MediaMetadataRetriever;
 
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.ProgressListener;
@@ -223,8 +222,8 @@ public final class AudioToWav {
                     ? format.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44_100;
             channels = format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
                     ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
-            floatPcm = format.containsKey(AudioFormat.KEY_PCM_ENCODING)
-                    && format.getInteger(AudioFormat.KEY_PCM_ENCODING)
+            floatPcm = format.containsKey(MediaFormat.KEY_PCM_ENCODING)
+                    && format.getInteger(MediaFormat.KEY_PCM_ENCODING)
                     == AudioFormat.ENCODING_PCM_FLOAT;
             step = inRate / (double) TARGET_RATE;
         }

@@ -49,7 +49,7 @@ public final class GroqKeyStore {
             return List.of();
         }
         try {
-            final byte[] blob = Base64.decode(Files.readAllBytes(file), Base64.NO_WRAP);
+            final byte[] blob = Base64.decode(Files.readAllBytes(file.toPath()), Base64.NO_WRAP);
             final byte[] plain = decrypt(blob);
             final List<String> keys = new ArrayList<>();
             for (final String line : new String(plain, StandardCharsets.UTF_8).split("\r\n|\n")) {

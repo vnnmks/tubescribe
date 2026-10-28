@@ -193,7 +193,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
-                            player = player
+                            setPlayer(player)
                             useController = true
                             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                             keepScreenOn = true
