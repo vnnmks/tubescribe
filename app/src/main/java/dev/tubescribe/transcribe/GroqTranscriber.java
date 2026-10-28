@@ -15,9 +15,6 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 import java.io.IOException;
-import java.io.OutputStream;
-import java.io.RandomAccessFile;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,8 +29,9 @@ import java.util.logging.Logger;
  * Cloud transcription through Groq's OpenAI-compatible Whisper endpoint
  * ({@code whisper-large-v3-turbo}).
  *
- * <p>The 16 kHz mono WAV is split at the quietest points into chunks below the
- * 25 MB upload limit. Each chunk is posted as multipart form data with
+ * <p>Audio arrives as pre-split {@code .m4a} chunks (see
+ * {@link dev.tubescribe.media.AudioChunker}), each below the 25 MB upload
+ * limit. Each chunk is posted as multipart form data with
  * {@code response_format=verbose_json} so segments carry absolute-in-chunk
  * timestamps, which are then offset by the chunk start. All configured API
  * keys are tried in order: rate limits move the request to the next key and
@@ -43,13 +41,7 @@ public final class GroqTranscriber {
     private static final Logger LOG = Logger.getLogger(GroqTranscriber.class.getName());
     private static final String ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
     private static final String MODEL_ID = "whisper-large-v3-turbo";
-    private static final MediaType AUDIO_WAV = MediaType.parse("audio/wav");
-
-    private static final int SAMPLE_RATE = 16_000;
-    private static final double HOP_SECONDS = 0.1;
-    private static final int HOP_FRAMES = (int) Math.round(HOP_SECONDS * SAMPLE_RATE);
-    private static final double MIN_CHUNK_SECONDS = 150.0;
-    private static final double MAX_CHUNK_SECONDS = 580.0; // ≈18.6 MB WAV, below the 25 MB limit
+    private static final MediaType AUDIO_M4A = MediaType.parse("audio/mp4");
 
     private static final long RETRY_BACKOFF_MS = 2_000;
     private static final int MAX_SAME_KEY_RETRIES = 2;
@@ -70,229 +62,48 @@ public final class GroqTranscriber {
                 .build();
     }
 
-    public List<SubtitleCue> transcribe(final Path wav, final ProgressListener listener,
+    public List<SubtitleCue> transcribe(final List<dev.tubescribe.media.AudioChunker.Chunk> chunks,
+                                        final ProgressListener listener,
                                         final Cancellation cancel) throws IOException {
         if (keys.isEmpty()) {
             throw new IOException("No Groq API keys configured. Add at least one key "
                     + "in Settings → Groq API keys.");
         }
-        LOG.info("Groq cloud transcription with " + keys.size() + " configured key(s)");
-        listener.update(0.0, "Finding quiet spots in the audio…");
-        final List<long[]> chunks = splitWav(wav, listener, cancel);
-        LOG.info("Groq upload plan: " + chunks.size() + " chunk(s) for " + wav.getFileName());
-
+        if (chunks.isEmpty()) {
+            throw new IOException("No audio was prepared for transcription.");
+        }
+        LOG.info("Groq cloud transcription with " + keys.size() + " configured key(s), "
+                + chunks.size() + " chunk(s)");
         final List<SubtitleCue> cues = new ArrayList<>();
         final int total = chunks.size();
+        long offsetUs = 0;
         for (int i = 0; i < total; i++) {
             cancel.throwIfCancelled();
-            final long[] chunk = chunks.get(i);
-            final Path chunkFile = wav.resolveSibling(
-                    String.format(Locale.ROOT, "groq-%04d.wav", i));
-            final double offset = chunk[0] / (double) SAMPLE_RATE;
-            final double chunkEnd = chunk[1] / (double) SAMPLE_RATE;
-            try {
-                listener.update(i / (double) total,
-                        "Groq chunk " + (i + 1) + "/" + total + " · uploading "
-                                + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
-                final String body = uploadChunk(chunkFile, chunk[0], chunk[1],
-                        keys, listener, i, total, cancel);
-                parseCues(body, offset, cues);
-                listener.update((i + 1) / (double) total,
-                        "Groq chunk " + (i + 1) + "/" + total + " · transcribed ("
-                                + cues.size() + " cues so far)");
-            } finally {
-                try {
-                    Files.deleteIfExists(chunkFile);
-                } catch (final IOException e) {
-                    LOG.fine("Could not remove chunk file: " + e.getMessage());
-                }
-            }
+            final dev.tubescribe.media.AudioChunker.Chunk chunk = chunks.get(i);
+            final double offset = offsetUs / 1_000_000.0;
+            final double chunkEnd = (offsetUs + chunk.durationUs()) / 1_000_000.0;
+            listener.update(i / (double) total,
+                    "Groq chunk " + (i + 1) + "/" + total + " · uploading "
+                            + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
+            final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
+                    keys, listener, i, total, cancel);
+            parseCues(body, offset, cues);
+            listener.update((i + 1) / (double) total,
+                    "Groq chunk " + (i + 1) + "/" + total + " · transcribed ("
+                            + cues.size() + " cues so far)");
+            offsetUs += chunk.durationUs();
         }
 
         listener.update(1.0, "Transcription complete");
         LOG.info("Groq returned " + cues.size() + " segment cue(s) from " + total
-                + " chunk(s) of " + wav.getFileName());
+                + " audio chunk(s)");
         cues.sort(SubtitleCue.byStart());
         return cues;
     }
 
-    // ------------------------------------------------------------------ chunks
-
-    /**
-     * Writes quiet-point-split WAV fragment files and returns the chunk list
-     * as {@code long[]{startFrame, endFrame}} pairs.
-     */
-    private List<long[]> splitWav(final Path wav, final ProgressListener listener,
-                                  final Cancellation cancel) throws IOException {
-        final double[] hopRms = waveformEnergy(wav, listener, cancel);
-        final long totalFrames = hopRms.length <= 0
-                ? 0 : (long) Math.ceil(hopRms.length * HOP_FRAMES);
-        final int maxChunkFrames = (int) (MAX_CHUNK_SECONDS * SAMPLE_RATE);
-        final int minChunkFrames = (int) (MIN_CHUNK_SECONDS * SAMPLE_RATE);
-
-        final List<long[]> chunks = new ArrayList<>();
-        long start = 0;
-        int startHop = 0;
-        while (totalFrames - start > maxChunkFrames) {
-            final int searchStart = startHop + minChunkFrames / HOP_FRAMES;
-            final int searchEnd = Math.min(hopRms.length,
-                    startHop + maxChunkFrames / HOP_FRAMES);
-            int bestHop = -1;
-            double bestRms = Double.MAX_VALUE;
-            for (int hop = searchStart; hop < searchEnd; hop++) {
-                if (hopRms[hop] < bestRms) {
-                    bestRms = hopRms[hop];
-                    bestHop = hop;
-                }
-            }
-            final int cutHop = bestHop >= 0 ? bestHop : startHop + maxChunkFrames / HOP_FRAMES;
-            final long cutFrame = Math.min(totalFrames,
-                    Math.round(cutHop * HOP_SECONDS * SAMPLE_RATE));
-            chunks.add(new long[]{start, cutFrame});
-            start = cutFrame;
-            startHop = cutHop;
-        }
-        if (totalFrames > start) {
-            chunks.add(new long[]{start, totalFrames});
-        }
-        if (chunks.isEmpty()) {
-            chunks.add(new long[]{0, Math.max(1, totalFrames)});
-        }
-        writeChunkFiles(wav, chunks, listener, cancel);
-        return chunks;
-    }
-
-    /** Per-0.1 s RMS levels of the WAV, used to pick silence-anchored cuts. */
-    private double[] waveformEnergy(final Path wav, final ProgressListener listener,
-                                    final Cancellation cancel) throws IOException {
-        final List<Double> rms = new ArrayList<>();
-        try (WavSource source = WavSource.open(wav)) {
-            final float[] buffer = new float[HOP_FRAMES];
-            while (true) {
-                cancel.throwIfCancelled();
-                final int read = source.read(buffer);
-                if (read <= 0) {
-                    break;
-                }
-                double sum = 0;
-                for (int i = 0; i < read; i++) {
-                    sum += buffer[i] * (double) buffer[i];
-                }
-                rms.add(read <= 0 ? 0 : Math.sqrt(sum / read));
-            }
-        }
-        final double[] values = new double[rms.size()];
-        for (int i = 0; i < values.length; i++) {
-            values[i] = rms.get(i);
-        }
-        return values;
-    }
-
-    /** One buffered sequential pass writes every fragment file. */
-    private void writeChunkFiles(final Path wav, final List<long[]> chunks,
-                                 final ProgressListener listener,
-                                 final Cancellation cancel) throws IOException {
-        final List<Path> files = new ArrayList<>();
-        final List<RandomAccessFile> headers = new ArrayList<>();
-        final List<OutputStream> streams = new ArrayList<>();
-        for (int i = 0; i < chunks.size(); i++) {
-            final Path target = wav.resolveSibling(
-                    String.format(Locale.ROOT, "groq-%04d.wav", i));
-            files.add(target);
-            final RandomAccessFile raf = new RandomAccessFile(target.toFile(), "rw");
-            raf.setLength(0);
-            writeRiffHeader(raf, (int) (chunks.get(i)[1] - chunks.get(i)[0]));
-            headers.add(raf);
-            streams.add(new java.io.BufferedOutputStream(
-                    new java.io.FileOutputStream(target.toFile(), true)));
-        }
-        try (WavSource source = WavSource.open(wav)) {
-            final float[] buffer = new float[SAMPLE_RATE]; // one second at a time
-            long framePos = 0;
-            int chunk = 0;
-            while (true) {
-                cancel.throwIfCancelled();
-                final int read = source.read(buffer);
-                if (read <= 0) {
-                    break;
-                }
-                final byte[] pcm = new byte[read * 2];
-                for (int i = 0; i < read; i++) {
-                    final float f = Math.max(-1f, Math.min(1f, buffer[i]));
-                    final int sample = Math.round(f * 32_767f);
-                    pcm[2 * i] = (byte) sample;
-                    pcm[2 * i + 1] = (byte) (sample >> 8);
-                }
-                int cursor = 0;
-                while (cursor < read) {
-                    final long chunkEnd = chunks.get(chunk)[1];
-                    final int take = (int) Math.min(read - cursor, chunkEnd - framePos);
-                    streams.get(chunk).write(pcm, cursor * 2, take * 2);
-                    framePos += take;
-                    cursor += take;
-                    if (framePos >= chunkEnd && chunk < chunks.size() - 1) {
-                        streams.get(chunk).flush();
-                        chunk++;
-                    }
-                }
-                final double progress = Math.min(0.98, framePos / Math.max(1.0,
-                        (double) chunks.get(chunks.size() - 1)[1]));
-                listener.update(progress, "Preparing cloud upload · "
-                        + Fmt.time(framePos / (double) SAMPLE_RATE) + " / "
-                        + Fmt.time(chunks.get(chunks.size() - 1)[1] / (double) SAMPLE_RATE));
-            }
-        } finally {
-            for (final OutputStream stream : streams) {
-                stream.flush();
-                stream.close();
-            }
-            for (final RandomAccessFile raf : headers) {
-                raf.close();
-            }
-        }
-    }
-
-    private static void writeRiffHeader(final RandomAccessFile file, final int frames)
-            throws IOException {
-        final int dataLength = frames * 2;
-        final byte[] header = new byte[44];
-        ascii(header, 0, "RIFF");
-        le32(header, 4, 36 + dataLength);
-        ascii(header, 8, "WAVE");
-        ascii(header, 12, "fmt ");
-        le32(header, 16, 16);
-        le16(header, 20, 1);              // PCM
-        le16(header, 22, 1);              // mono
-        le32(header, 24, SAMPLE_RATE);
-        le32(header, 28, SAMPLE_RATE * 2);
-        le16(header, 32, 2);              // block align
-        le16(header, 34, 16);             // bits per sample
-        ascii(header, 36, "data");
-        le32(header, 40, dataLength);
-        file.write(header);
-    }
-
-    private static void ascii(final byte[] target, final int offset, final String value) {
-        for (int i = 0; i < value.length(); i++) {
-            target[offset + i] = (byte) value.charAt(i);
-        }
-    }
-
-    private static void le16(final byte[] target, final int offset, final int value) {
-        target[offset] = (byte) (value & 0xFF);
-        target[offset + 1] = (byte) ((value >> 8) & 0xFF);
-    }
-
-    private static void le32(final byte[] target, final int offset, final int value) {
-        target[offset] = (byte) (value & 0xFF);
-        target[offset + 1] = (byte) ((value >> 8) & 0xFF);
-        target[offset + 2] = (byte) ((value >> 16) & 0xFF);
-        target[offset + 3] = (byte) ((value >> 24) & 0xFF);
-    }
-
     // ------------------------------------------------------------------ upload
 
-    private String uploadChunk(final Path file, final long startFrames, final long endFrames,
+    private String uploadChunk(final Path file, final double startSec, final double endSec,
                                final List<String> keys, final ProgressListener listener,
                                final int chunk, final int total,
                                final Cancellation cancel) throws IOException {
@@ -308,13 +119,13 @@ public final class GroqTranscriber {
             final String key = keys.get(index);
             final String masked = "key#" + (index + 1);
             try {
-                final RequestBody fileBody = RequestBody.create(file.toFile(), AUDIO_WAV);
+                final RequestBody fileBody = RequestBody.create(file.toFile(), AUDIO_M4A);
                 final MultipartBody form = new MultipartBody.Builder()
                         .setType(MultipartBody.FORM)
                         .addFormDataPart("model", MODEL_ID)
                         .addFormDataPart("response_format", "verbose_json")
                         .addFormDataPart("temperature", "0")
-                        .addFormDataPart("file", "chunk.wav", fileBody)
+                        .addFormDataPart("file", "audio.m4a", fileBody)
                         .build();
                 final Request request = new Request.Builder()
                         .url(ENDPOINT)
@@ -329,8 +140,7 @@ public final class GroqTranscriber {
                     final String body = response.body() == null ? "" : response.body().string();
                     if (response.isSuccessful()) {
                         LOG.info("Groq chunk " + (chunk + 1) + "/" + total + " ("
-                                + Fmt.time(startFrames / (double) SAMPLE_RATE) + "–"
-                                + Fmt.time(endFrames / (double) SAMPLE_RATE)
+                                + Fmt.time(startSec) + "–" + Fmt.time(endSec)
                                 + ") succeeded via " + masked);
                         return body;
                     }

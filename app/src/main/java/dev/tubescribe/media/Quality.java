@@ -31,6 +31,16 @@ public enum Quality {
         return fallback;
     }
 
+    /** Maps a pixel height (e.g. 360) to the closest requested quality. */
+    public static Quality fromHeight(final int height, final Quality fallback) {
+        for (final Quality quality : values()) {
+            if (quality.maxHeight == height) {
+                return quality;
+            }
+        }
+        return fallback;
+    }
+
     @Override
     public String toString() {
         return label;

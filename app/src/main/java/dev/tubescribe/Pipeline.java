@@ -1,6 +1,6 @@
 package dev.tubescribe;
 
-import dev.tubescribe.media.AudioToWav;
+import dev.tubescribe.media.AudioChunker;
 import dev.tubescribe.media.MediaDownloader;
 import dev.tubescribe.media.MediaException;
 import dev.tubescribe.media.Quality;
@@ -65,7 +65,6 @@ public final class Pipeline {
         cacheDir.mkdirs();
         final File media = new File(cacheDir, "video.mp4");
         final File audioSource = new File(cacheDir, "audio-source.m4a");
-        final File wav = new File(cacheDir, "audio16k.wav");
         final File subtitleFile = new File(cacheDir, "subtitles.srt");
         final File metaFile = new File(cacheDir, "meta.properties");
 
@@ -95,22 +94,29 @@ public final class Pipeline {
 
         final VideoInfo info = readMeta(id, metaFile);
         if (!subtitleFile.isFile()) {
-            if (!valid(wav)) {
-                listener.update(0.71, "Extracting audio…");
-                final File audioIn = valid(audioSource) ? audioSource : media;
-                AudioToWav.extract(audioIn, wav, map(listener, 0.71, 0.12), cancel);
+            // No decoding: the compressed audio is split into upload-sized
+            // m4a chunks by sample passthrough (a couple of seconds of file
+            // copying) and sent to Groq as-is.
+            listener.update(0.71, "Preparing audio for the cloud…");
+            final File audioIn = valid(audioSource) ? audioSource : media;
+            final List<AudioChunker.Chunk> chunks =
+                    AudioChunker.split(audioIn, cacheDir, map(listener, 0.71, 0.05), cancel);
+            try {
+                cancel.throwIfCancelled();
+                listener.update(0.76, "Transcribing with Groq Whisper…");
+                final ProgressListener cloudProgress = map(listener, 0.76, 0.23);
+                final SubtitleTrack track = new SubtitleTrack(
+                        new GroqTranscriber(groqKeys).transcribe(chunks, cloudProgress, cancel));
+                writeSubtitleFile(subtitleFile, track);
+            } finally {
+                for (final AudioChunker.Chunk chunk : chunks) {
+                    //noinspection ResultOfMethodCallIgnored
+                    chunk.file().delete();
+                }
             }
-            cancel.throwIfCancelled();
-            listener.update(0.84, "Transcribing with Groq Whisper…");
-            final ProgressListener cloudProgress = map(listener, 0.85, 0.14);
-            final SubtitleTrack track = new SubtitleTrack(
-                    new GroqTranscriber(groqKeys).transcribe(wav.toPath(), cloudProgress, cancel));
-            writeSubtitleFile(subtitleFile, track);
         }
 
         // The transcription is stored; the bulky intermediates are no longer needed.
-        //noinspection ResultOfMethodCallIgnored
-        wav.delete();
         //noinspection ResultOfMethodCallIgnored
         audioSource.delete();
 
@@ -267,14 +273,15 @@ public final class Pipeline {
             }
             final VideoInfo info = readMeta(dir.getName(), new File(dir, "meta.properties"));
             result.add(new RecentVideo(info.id(), info.title(), info.uploader(),
-                    info.qualityLabel(), info.durationSeconds(), media, subs, subs.lastModified()));
+                    info.qualityLabel(), info.durationSeconds(), info.canonicalUrl(),
+                    media, subs, subs.lastModified()));
         }
         result.sort(Comparator.comparingLong(RecentVideo::modified).reversed());
         return result;
     }
 
     public record RecentVideo(String id, String title, String uploader, String qualityLabel,
-                              long durationSeconds, File mediaFile, File subtitleFile,
+                              long durationSeconds, String url, File mediaFile, File subtitleFile,
                               long modified) {
         public String metaLine() {
             return qualityLabel + " · " + Fmt.time(durationSeconds) + " · "

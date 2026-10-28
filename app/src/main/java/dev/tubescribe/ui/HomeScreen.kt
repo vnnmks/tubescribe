@@ -263,7 +263,20 @@ fun HomeScreen(
                 ) {
                     items(recent, key = { it.id() }) { item ->
                         RecentRow(item = item, onClick = {
-                            onOpenPlayer(PlayerArgs.from(item))
+                            val media = item.mediaFile()
+                            val subs = item.subtitleFile()
+                            if (media.isFile && media.length() >= 1024 && subs.isFile) {
+                                onOpenPlayer(PlayerArgs.from(item))
+                            } else {
+                                // The cache vanished (cleared storage, interrupted run…):
+                                // re-fetch and re-transcribe instead of opening a broken player.
+                                val height = item.qualityLabel()
+                                    .filter { c -> c.isDigit() }.toIntOrNull() ?: 720
+                                viewModel.start(
+                                    item.url(),
+                                    Quality.fromHeight(height, Quality.P720)
+                                )
+                            }
                         })
                     }
                 }
