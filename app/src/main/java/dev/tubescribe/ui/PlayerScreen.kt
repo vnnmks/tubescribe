@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -23,15 +24,15 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ClosedCaption
-import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -59,6 +60,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -70,6 +72,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -86,6 +89,7 @@ import dev.tubescribe.util.Fmt
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -129,6 +133,14 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         if (controlsVisible && playing) {
             delay(3_000)
             controlsVisible = false
+        }
+    }
+    // Transient "−10 s"/"+10 s" bubble after a double-tap seek (-1 left, +1 right).
+    var seekNudge by remember { mutableStateOf(0) }
+    LaunchedEffect(seekNudge) {
+        if (seekNudge != 0) {
+            delay(500)
+            seekNudge = 0
         }
     }
 
@@ -304,115 +316,30 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxSize()
                 )
-                // Tap surface: toggles the control overlay.
+                // Tap surface: single tap toggles the controls; double tap on
+                // either half of the video seeks back/forward 10 seconds.
                 Box(
                     Modifier
                         .matchParentSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { controlsVisible = !controlsVisible }
-                )
-                if (controlsVisible) {
-                    Column(
-                        Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))
-                                )
-                            )
-                            .padding(top = 28.dp)
-                    ) {
-                        // ---- seek row: 0:03 [====slider====] 3:33
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                Fmt.clock((if (seeking) seekTargetMs else positionMs) / 1000.0),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White
-                            )
-                            Slider(
-                                value = (if (seeking) seekTargetMs else positionMs)
-                                    .coerceIn(0L, durationMs.coerceAtLeast(0L)).toFloat(),
-                                onValueChange = {
-                                    seekTargetMs = it.toLong()
-                                    seeking = true
-                                },
-                                onValueChangeFinished = {
-                                    player.seekTo(seekTargetMs)
-                                    seeking = false
-                                },
-                                valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = MaterialTheme.colorScheme.primary,
-                                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.35f)
-                                ),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(28.dp)
-                            )
-                            Text(
-                                Fmt.clock(durationMs / 1000.0),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White
-                            )
-                        }
-                        // ---- transport row
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = {
-                                player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0))
-                            }) {
-                                Icon(
-                                    Icons.Default.Replay10,
-                                    contentDescription = "Back 10 seconds",
-                                    tint = Color.White
-                                )
-                            }
-                            IconButton(onClick = {
-                                // At the end of the stream ExoPlayer stays ENDED until rewound.
-                                if (durationMs > 0 && player.currentPosition >= durationMs - 250) {
-                                    player.seekTo(0)
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { controlsVisible = !controlsVisible },
+                                onDoubleTap = { offset ->
+                                    if (offset.x < size.width / 2f) {
+                                        player.seekTo(
+                                            (player.currentPosition - 10_000).coerceAtLeast(0))
+                                        seekNudge = -1
+                                    } else {
+                                        player.seekTo(player.currentPosition + 10_000)
+                                        seekNudge = 1
+                                    }
                                 }
-                                player.playPause()
-                            }) {
-                                Icon(
-                                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    contentDescription = if (playing) "Pause" else "Play",
-                                    modifier = Modifier.size(38.dp),
-                                    tint = Color.White
-                                )
-                            }
-                            IconButton(onClick = { player.seekTo(player.currentPosition + 10_000) }) {
-                                Icon(
-                                    Icons.Default.Forward10,
-                                    contentDescription = "Forward 10 seconds",
-                                    tint = Color.White
-                                )
-                            }
-                            IconButton(onClick = { subsOn = !subsOn }) {
-                                Icon(
-                                    Icons.Default.ClosedCaption,
-                                    contentDescription = "Toggle subtitles",
-                                    tint = if (subsOn) MaterialTheme.colorScheme.primary
-                                    else Color.White.copy(alpha = 0.6f)
-                                )
-                            }
+                            )
                         }
-                    }
-                }
+                )
+                // Subtitle overlay sits BELOW the controls layer: wherever the
+                // user drags it, the CC button / play button / slider stay on
+                // top and remain tappable (YouTube does the same).
                 if (subsOn && currentIndex >= 0) {
                     Box(
                         Modifier
@@ -447,13 +374,161 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             }
                             .pointerInput(Unit) {
                                 // Long-press resets to the default bottom-center spot.
-                                detectTapGestures(onLongPress = {
-                                    subsPlaced = false
-                                    TubeApp.subtitlePlaced = false
-                                })
+                                // Hand-rolled (instead of detectTapGestures) so ordinary
+                                // taps are NOT consumed here: the overlay may sit on top
+                                // of the CC / play buttons or the slider, and those must
+                                // stay tappable through it.
+                                awaitEachGesture {
+                                    // awaitEachGesture only enters after a pointer
+                                    // went down, so no explicit awaitFirstDown here.
+                                    var intercepted = false
+                                    val completed = withTimeoutOrNull(
+                                        viewConfiguration.longPressTimeoutMillis
+                                    ) {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            if (event.changes.any { it.isConsumed }) {
+                                                // A drag took over; leave it alone.
+                                                intercepted = true
+                                                break
+                                            }
+                                            if (event.changes.none { it.pressed }) break
+                                        }
+                                    }
+                                    if (completed == null && !intercepted) {
+                                        // Long press fired: swallow the rest of the
+                                        // gesture so no tap leaks to the controls below.
+                                        awaitPointerEvent().changes.forEach { it.consume() }
+                                        subsPlaced = false
+                                        TubeApp.subtitlePlaced = false
+                                    }
+                                }
                             }
                     ) {
                         SubtitleOverlay(cue = track.cues()[currentIndex])
+                    }
+                }
+                if (controlsVisible) {
+                    // Subtitle toggle, top-right corner.
+                    IconButton(
+                        onClick = { subsOn = !subsOn },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.ClosedCaption,
+                            contentDescription = "Toggle subtitles",
+                            tint = if (subsOn) MaterialTheme.colorScheme.primary
+                            else Color.White.copy(alpha = 0.75f)
+                        )
+                    }
+                    // Big center play/pause; replay once the stream has ended.
+                    val ended = durationMs > 0 && positionMs >= durationMs - 250
+                    IconButton(
+                        onClick = {
+                            if (ended) {
+                                player.seekTo(0)
+                                player.play()
+                            } else {
+                                player.playPause()
+                            }
+                        },
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(80.dp)
+                    ) {
+                        Icon(
+                            when {
+                                ended -> Icons.Default.Replay
+                                playing -> Icons.Default.Pause
+                                else -> Icons.Default.PlayArrow
+                            },
+                            contentDescription = when {
+                                ended -> "Replay"
+                                playing -> "Pause"
+                                else -> "Play"
+                            },
+                            modifier = Modifier.size(60.dp),
+                            tint = Color.White
+                        )
+                    }
+                    // Bottom bar over a scrim: 3:36 ——•—— 06:59
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))
+                                )
+                            )
+                            .padding(top = 32.dp, bottom = 2.dp)
+                    ) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                Fmt.clock((if (seeking) seekTargetMs else positionMs) / 1000.0),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White
+                            )
+                            Slider(
+                                value = (if (seeking) seekTargetMs else positionMs)
+                                    .coerceIn(0L, durationMs.coerceAtLeast(0L)).toFloat(),
+                                onValueChange = {
+                                    seekTargetMs = it.toLong()
+                                    seeking = true
+                                },
+                                onValueChangeFinished = {
+                                    player.seekTo(seekTargetMs)
+                                    seeking = false
+                                },
+                                valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.35f)
+                                ),
+                                thumb = {
+                                    SliderDefaults.Thumb(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        thumbSize = DpSize(12.dp, 12.dp),
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = MaterialTheme.colorScheme.primary
+                                        )
+                                    )
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(24.dp)
+                            )
+                            Text(
+                                Fmt.clock(durationMs / 1000.0),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+                // Transient ±10 s feedback after a double-tap seek.
+                if (seekNudge != 0) {
+                    Box(
+                        Modifier
+                            .align(if (seekNudge < 0) Alignment.CenterStart else Alignment.CenterEnd)
+                            .padding(horizontal = 24.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            if (seekNudge < 0) "−10 s" else "+10 s",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White
+                        )
                     }
                 }
             }
