@@ -266,15 +266,16 @@ public final class Pipeline {
                 continue;
             }
             final VideoInfo info = readMeta(dir.getName(), new File(dir, "meta.properties"));
-            result.add(new RecentVideo(info.id(), info.title(), info.qualityLabel(),
-                    info.durationSeconds(), media, subs, subs.lastModified()));
+            result.add(new RecentVideo(info.id(), info.title(), info.uploader(),
+                    info.qualityLabel(), info.durationSeconds(), media, subs, subs.lastModified()));
         }
         result.sort(Comparator.comparingLong(RecentVideo::modified).reversed());
         return result;
     }
 
-    public record RecentVideo(String id, String title, String qualityLabel, long durationSeconds,
-                              File mediaFile, File subtitleFile, long modified) {
+    public record RecentVideo(String id, String title, String uploader, String qualityLabel,
+                              long durationSeconds, File mediaFile, File subtitleFile,
+                              long modified) {
         public String metaLine() {
             return qualityLabel + " · " + Fmt.time(durationSeconds) + " · "
                     + (modified > 0 ? new java.text.SimpleDateFormat("MMM d",

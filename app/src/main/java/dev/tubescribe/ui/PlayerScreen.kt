@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -35,6 +36,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -46,10 +51,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -69,6 +76,7 @@ import dev.tubescribe.subs.SubtitleTrack
 import dev.tubescribe.util.Fmt
 import java.io.File
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,12 +101,24 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     }
 
     var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
     var playing by remember { mutableStateOf(false) }
+    var controlsVisible by remember { mutableStateOf(true) }
     LaunchedEffect(player) {
         while (true) {
             positionMs = player.currentPosition
             playing = player.isPlaying
+            val duration = player.duration
+            if (duration > 0) durationMs = duration
+            if (!player.isPlaying) controlsVisible = true // paused/ended keeps controls up
             delay(120)
+        }
+    }
+    // ExoPlayer-style: while playing, fade the controls out a few seconds after they show.
+    LaunchedEffect(controlsVisible, playing) {
+        if (controlsVisible && playing) {
+            delay(3_000)
+            controlsVisible = false
         }
     }
 
@@ -108,6 +128,10 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     var subsOn by rememberSaveable { mutableStateOf(true) }
     var autoFollow by remember { mutableStateOf(true) }
     var showMenu by remember { mutableStateOf(false) }
+    var seeking by remember { mutableStateOf(false) }
+    var seekTargetMs by remember { mutableLongStateOf(0L) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
     LaunchedEffect(currentIndex, autoFollow) {
@@ -117,6 +141,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -165,9 +190,13 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             text = { Text("Copy transcript text") },
                             onClick = {
                                 showMenu = false
-                                clipboard.setText(AnnotatedString(
-                                    track.cues().joinToString("\n") { it.text() }
-                                ))
+                                val lines = track.cues().joinToString("\n") { it.text() }
+                                clipboard.setText(AnnotatedString(lines))
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        "Copied ${track.cues().size} lines to clipboard"
+                                    )
+                                }
                             }
                         )
                     }
@@ -188,60 +217,140 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
             Box(
                 Modifier
                     .fillMaxWidth()
+                    .height(240.dp)
                     .background(Color.Black)
             ) {
                 AndroidView(
                     factory = { ctx ->
                         PlayerView(ctx).apply {
                             setPlayer(player)
-                            useController = true
+                            // Custom controller below pops up on tap (ExoPlayer-style);
+                            // the built-in one would duplicate it.
+                            useController = false
                             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                             keepScreenOn = true
                         }
                     },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp)
+                    modifier = Modifier.fillMaxSize()
                 )
+                // Tap surface: toggles the control overlay.
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { controlsVisible = !controlsVisible }
+                )
+                if (controlsVisible) {
+                    Column(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))
+                                )
+                            )
+                            .padding(top = 28.dp)
+                    ) {
+                        // ---- seek row: 0:03 [====slider====] 3:33
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                Fmt.clock((if (seeking) seekTargetMs else positionMs) / 1000.0),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White
+                            )
+                            Slider(
+                                value = (if (seeking) seekTargetMs else positionMs)
+                                    .coerceIn(0L, durationMs.coerceAtLeast(0L)).toFloat(),
+                                onValueChange = {
+                                    seekTargetMs = it.toLong()
+                                    seeking = true
+                                },
+                                onValueChangeFinished = {
+                                    player.seekTo(seekTargetMs)
+                                    seeking = false
+                                },
+                                valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.35f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(28.dp)
+                            )
+                            Text(
+                                Fmt.clock(durationMs / 1000.0),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White
+                            )
+                        }
+                        // ---- transport row
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = {
+                                player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0))
+                            }) {
+                                Icon(
+                                    Icons.Default.Replay10,
+                                    contentDescription = "Back 10 seconds",
+                                    tint = Color.White
+                                )
+                            }
+                            IconButton(onClick = {
+                                // At the end of the stream ExoPlayer stays ENDED until rewound.
+                                if (durationMs > 0 && player.currentPosition >= durationMs - 250) {
+                                    player.seekTo(0)
+                                }
+                                player.playPause()
+                            }) {
+                                Icon(
+                                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (playing) "Pause" else "Play",
+                                    modifier = Modifier.size(38.dp),
+                                    tint = Color.White
+                                )
+                            }
+                            IconButton(onClick = { player.seekTo(player.currentPosition + 10_000) }) {
+                                Icon(
+                                    Icons.Default.Forward10,
+                                    contentDescription = "Forward 10 seconds",
+                                    tint = Color.White
+                                )
+                            }
+                            IconButton(onClick = { subsOn = !subsOn }) {
+                                Icon(
+                                    Icons.Default.ClosedCaption,
+                                    contentDescription = "Toggle subtitles",
+                                    tint = if (subsOn) MaterialTheme.colorScheme.primary
+                                    else Color.White.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                    }
+                }
                 if (subsOn && currentIndex >= 0) {
-                    SubtitleOverlay(cue = track.cues()[currentIndex])
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = if (controlsVisible) 92.dp else 12.dp)
+                    ) {
+                        SubtitleOverlay(cue = track.cues()[currentIndex])
+                    }
                 }
-            }
-
-            // -------------------------------------------------- transport
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0)) }) {
-                    Icon(Icons.Default.Replay10, contentDescription = "Back 10 seconds")
-                }
-                IconButton(onClick = { player.playPause() }) {
-                    Icon(
-                        if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (playing) "Pause" else "Play",
-                        modifier = Modifier.size(38.dp)
-                    )
-                }
-                IconButton(onClick = { player.seekTo(player.currentPosition + 10_000) }) {
-                    Icon(Icons.Default.Forward10, contentDescription = "Forward 10 seconds")
-                }
-                IconButton(onClick = { subsOn = !subsOn }) {
-                    Icon(
-                        Icons.Default.ClosedCaption,
-                        contentDescription = "Toggle subtitles",
-                        tint = if (subsOn) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Text(
-                    Fmt.clock(positionSec) + " / " + Fmt.clock(player.duration.coerceAtLeast(0) / 1000.0),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
 
             // ------------------------------------------------- transcript

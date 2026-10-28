@@ -39,7 +39,7 @@ data class PlayerArgs(
             subsPath = recent.subtitleFile().absolutePath,
             videoId = recent.id(),
             title = recent.title(),
-            uploader = "",
+            uploader = recent.uploader() ?: "",
             qualityLabel = recent.qualityLabel()
         )
     }

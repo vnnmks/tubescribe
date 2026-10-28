@@ -437,7 +437,9 @@ public final class GroqTranscriber {
                 if (text.isEmpty()) {
                     continue;
                 }
-                cues.add(new SubtitleCue(start, Math.max(end, start + 0.4), text));
+                // Split long segments so the subtitle overlay stays readable.
+                cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
+                        start, Math.max(end, start + 0.4) - start, text));
             }
         } catch (final com.grack.nanojson.JsonParserException e) {
             throw new IOException("Groq returned an unreadable response: " + e.getMessage(), e);
