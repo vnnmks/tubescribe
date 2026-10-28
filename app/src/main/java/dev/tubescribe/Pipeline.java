@@ -121,9 +121,25 @@ public final class Pipeline {
         audioSource.delete();
 
         final SubtitleTrack track = SubtitleTrack.readSrt(subtitleFile.toPath());
-        listener.update(1.0, track.isEmpty()
-                ? "Media ready · no speech detected"
-                : "Ready · " + track.size() + " subtitle cues");
+        final StringBuilder status = new StringBuilder();
+        if (info.height() > 0 && info.wantedHeight() > info.height()) {
+            // The requested ceiling does not exist in this video; state what does.
+            status.append(info.height()).append("p (no ").append(info.wantedHeight())
+                    .append("p in this video");
+            final String available = info.availableLabel();
+            if (!available.isEmpty()) {
+                status.append(" · available: ").append(available);
+            }
+            status.append(')');
+        } else if (!info.qualityLabel().isBlank()) {
+            status.append(info.qualityLabel());
+        }
+        final String qualityNote = status.toString();
+        final String subtitleSummary = track.isEmpty() ? "no speech detected"
+                : track.size() + " subtitle cues";
+        listener.update(1.0, qualityNote.isEmpty()
+                ? (track.isEmpty() ? "Media ready · no speech detected" : "Ready · " + subtitleSummary)
+                : "Ready · " + qualityNote + " · " + subtitleSummary);
         return new Result(media, subtitleFile, track, info, false);
     }
 
@@ -205,6 +221,7 @@ public final class Pipeline {
     }
 
     private static void saveMeta(final File metaFile, final VideoInfo info) throws IOException {
+        // Strip the dynamic bits (stream URLs) — only identity + quality data persist.
         final Properties properties = new Properties();
         properties.setProperty("id", info.id());
         properties.setProperty("title", info.title() == null ? "" : info.title());
@@ -215,6 +232,19 @@ public final class Pipeline {
         properties.setProperty("height", Integer.toString(info.height()));
         properties.setProperty("fps", Integer.toString(info.fps()));
         properties.setProperty("quality", info.qualityLabel() == null ? "" : info.qualityLabel());
+        // Quality context for the player: what the video offers, and which
+        // ceiling was requested at fetch time (0 when unknown).
+        if (info.videoHeights() != null) {
+            final StringBuilder heights = new StringBuilder();
+            for (final Integer height : info.videoHeights()) {
+                if (heights.length() > 0) {
+                    heights.append(',');
+                }
+                heights.append(height);
+            }
+            properties.setProperty("heights", heights.toString());
+        }
+        properties.setProperty("wantedHeight", Integer.toString(info.wantedHeight()));
         final File temp = new File(metaFile.getParentFile(), metaFile.getName() + ".part");
         try (OutputStream out = Files.newOutputStream(temp.toPath())) {
             properties.store(out, "TubeScribe video metadata");
@@ -243,8 +273,20 @@ public final class Pipeline {
         final int fps = (int) parseLong(properties.getProperty("fps"), 0);
         final String quality = properties.getProperty("quality", height > 0 ? height + "p" : "");
         final String url = properties.getProperty("url", YouTubeClient.canonicalUrl(id));
+        final List<Integer> heights = new ArrayList<>();
+        for (final String part : properties.getProperty("heights", "").split(",")) {
+            try {
+                final int value = Integer.parseInt(part.strip());
+                if (value > 0 && !heights.contains(value)) {
+                    heights.add(value);
+                }
+            } catch (final NumberFormatException ignored) {
+                // Older cache entries have no "heights" property at all.
+            }
+        }
+        final int wantedHeight = (int) parseLong(properties.getProperty("wantedHeight"), 0);
         return new VideoInfo(id, title.isBlank() ? id : title, uploader, duration, url,
-                null, null, null, height, fps, quality);
+                null, null, null, height, fps, quality, heights, wantedHeight);
     }
 
     private static long parseLong(final String value, final long fallback) {

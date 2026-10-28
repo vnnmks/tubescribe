@@ -10,16 +10,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import dev.tubescribe.Pipeline
 import dev.tubescribe.TubeViewModel
+import dev.tubescribe.net.VideoInfo
 import java.io.File
 
-/** Where the player should open; paths only so it survives state saving. */
+/**
+ * Where the player should open; paths only so it survives state saving.
+ */
 data class PlayerArgs(
     val mediaPath: String,
     val subsPath: String,
     val videoId: String,
     val title: String,
     val uploader: String,
-    val qualityLabel: String
+    val qualityLabel: String,
+    val qualityNote: String = ""
 ) {
     companion object {
         fun from(result: Pipeline.Result): PlayerArgs {
@@ -30,7 +34,8 @@ data class PlayerArgs(
                 videoId = info.id(),
                 title = info.title(),
                 uploader = info.uploader(),
-                qualityLabel = info.qualityLabel()
+                qualityLabel = info.qualityLabel(),
+                qualityNote = availabilityNote(info)
             )
         }
 
@@ -42,6 +47,27 @@ data class PlayerArgs(
             uploader = recent.uploader() ?: "",
             qualityLabel = recent.qualityLabel()
         )
+    }
+}
+
+/**
+ * A short warning for the player header when the quality picked at fetch time
+ * could not be met: "No 720p in this video — downloaded at 360p
+ * (available: 1080p / 480p / 360p)". Empty when the tier was met or unknown.
+ */
+private fun availabilityNote(info: VideoInfo): String {
+    val wanted = info.wantedHeight()
+    val picked = info.height()
+    if (wanted <= 0 || picked <= 0 || picked >= wanted) {
+        return ""
+    }
+    val available = info.availableLabel()
+    return buildString {
+        append("No ").append(wanted).append("p in this video — downloaded at ")
+            .append(picked).append('p')
+        if (available.isNotBlank()) {
+            append(" (available: ").append(available).append(')')
+        }
     }
 }
 

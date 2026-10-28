@@ -145,6 +145,7 @@ public final class YouTubeClient {
             final List<VideoStream> videoOnly = safe(extractor.getVideoOnlyStreams());
             final List<VideoStream> muxed = safe(extractor.getVideoStreams());
             final List<AudioStream> audio = safe(extractor.getAudioStreams());
+            final List<Integer> heights = availableHeights(videoOnly, muxed);
 
             final VideoStream bestVideo = chooseVideo(videoOnly, quality.maxHeight());
             final VideoStream bestMuxed = chooseVideo(muxed, quality.maxHeight());
@@ -153,8 +154,13 @@ public final class YouTubeClient {
             // Prefer DASH video+audio, unless the progressive stream is taller:
             // some low-resolution videos only have small video-only H.264 streams
             // while their muxed stream is the best H.264/AAC combination.
+            // The one exception: when the muxed stream overshoots the requested
+            // ceiling (possible once a low ceiling falls back to smaller
+            // candidates), the DASH pair follows the ceiling instead.
             if (bestVideo != null && bestAudio != null
-                    && (bestMuxed == null || heightOf(bestVideo) >= heightOf(bestMuxed))) {
+                    && (bestMuxed == null
+                        || heightOf(bestMuxed) > quality.maxHeight()
+                        || heightOf(bestVideo) >= heightOf(bestMuxed))) {
                 final String videoUrl = streamUrl(bestVideo);
                 final String audioUrl = streamUrl(bestAudio);
                 if (videoUrl != null && audioUrl != null) {
@@ -164,7 +170,8 @@ public final class YouTubeClient {
                             + audioBitrate(bestAudio) + " bps for " + id);
                     return new VideoInfo(id, title, uploader, duration, canonical, null,
                             videoUrl, audioUrl, height, Math.max(0, bestVideo.getFps()),
-                            qualityLabel(height, bestVideo.getFps()));
+                            qualityLabel(height, bestVideo.getFps()),
+                            heights, quality.maxHeight());
                 }
             }
 
@@ -176,7 +183,8 @@ public final class YouTubeClient {
                             + "p for " + id);
                     return new VideoInfo(id, title, uploader, duration, canonical, muxedUrl,
                             null, null, height, Math.max(0, bestMuxed.getFps()),
-                            qualityLabel(height, bestMuxed.getFps()));
+                            qualityLabel(height, bestMuxed.getFps()),
+                            heights, quality.maxHeight());
                 }
             }
 
@@ -221,19 +229,55 @@ public final class YouTubeClient {
                 continue;
             }
             final int height = heightOf(stream);
-            if (height <= 0 || height > maxHeight) {
-                continue;
-            }
-            if (streamUrl(stream) == null) {
+            if (height <= 0 || streamUrl(stream) == null) {
                 continue;
             }
             candidates.add(stream);
         }
+        // Ascending: height, then fps, then bitrate.
         candidates.sort(Comparator
                 .comparingInt(YouTubeClient::heightOf)
                 .thenComparingInt(VideoStream::getFps)
                 .thenComparingInt(VideoStream::getBitrate));
-        return candidates.isEmpty() ? null : candidates.get(candidates.size() - 1);
+        // Tallest candidate at or below the requested ceiling.
+        VideoStream best = null;
+        for (final VideoStream stream : candidates) {
+            if (heightOf(stream) <= maxHeight) {
+                best = stream;
+            } else {
+                break;
+            }
+        }
+        if (best != null) {
+            return best;
+        }
+        // Nothing fits under the ceiling (e.g. 144p on a video whose smallest
+        // stream is 240p): snap to the smallest available rather than failing.
+        return candidates.isEmpty() ? null : candidates.get(0);
+    }
+
+    /** Heights of every deliverable MP4/H.264 video stream, sorted high to low. */
+    private static List<Integer> availableHeights(final List<VideoStream> videoOnly,
+                                                  final List<VideoStream> muxed) {
+        final List<Integer> heights = new ArrayList<>();
+        for (final VideoStream stream : videoOnly) {
+            addHeight(heights, stream);
+        }
+        for (final VideoStream stream : muxed) {
+            addHeight(heights, stream);
+        }
+        heights.sort(Comparator.reverseOrder());
+        return heights;
+    }
+
+    private static void addHeight(final List<Integer> heights, final VideoStream stream) {
+        if (stream.getFormat() != MediaFormat.MPEG_4 || !isAvc(stream.getCodec())) {
+            return;
+        }
+        final int height = heightOf(stream);
+        if (height > 0 && !heights.contains(height)) {
+            heights.add(height);
+        }
     }
 
     private static AudioStream chooseAudio(final List<AudioStream> streams) {

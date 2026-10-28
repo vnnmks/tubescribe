@@ -2,9 +2,12 @@ package dev.tubescribe.media;
 
 /** Requested maximum video height. */
 public enum Quality {
+    P144("144p", 144),
+    P240("240p", 240),
     P360("360p", 360),
+    P480("480p", 480),
     P720("720p", 720),
-    P1080("1080p (best)", 1080);
+    P1080("1080p", 1080);
 
     private final String label;
     private final int maxHeight;

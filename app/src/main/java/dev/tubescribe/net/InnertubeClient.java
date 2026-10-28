@@ -13,6 +13,7 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -215,7 +216,8 @@ public final class InnertubeClient {
             final int fps = bestVideo.getInt("fps", 0);
             return new VideoInfo(videoId, title, author, duration, WATCH_URL + videoId, null,
                     bestVideo.getString("url", null), bestAudio.getString("url", null),
-                    height, fps, height + "p" + (fps > 40 ? Integer.toString(fps) : ""));
+                    height, fps, height + "p" + (fps > 40 ? Integer.toString(fps) : ""),
+                    availableHeights(streaming), quality.maxHeight());
         }
 
         // No separate pair; fall back to a muxed H.264/AAC progressive stream.
@@ -254,9 +256,38 @@ public final class InnertubeClient {
             final int fps = bestMuxed.getInt("fps", 0);
             return new VideoInfo(videoId, title, author, duration, WATCH_URL + videoId,
                     bestMuxed.getString("url", null), null, null, height, fps,
-                    height + "p" + (fps > 40 ? Integer.toString(fps) : ""));
+                    height + "p" + (fps > 40 ? Integer.toString(fps) : ""),
+                    availableHeights(streaming), quality.maxHeight());
         }
         return null;
+    }
+
+    /** Heights of every MP4/H.264 video format in streamingData, sorted high to low. */
+    private static List<Integer> availableHeights(final JsonObject streaming) {
+        final List<Integer> heights = new ArrayList<>();
+        collectHeights(heights, streaming.getArray("adaptiveFormats"));
+        collectHeights(heights, streaming.getArray("formats"));
+        heights.sort(java.util.Collections.reverseOrder());
+        return heights;
+    }
+
+    private static void collectHeights(final List<Integer> heights, final JsonArray formats) {
+        if (formats == null) {
+            return;
+        }
+        for (int i = 0; i < formats.size(); i++) {
+            final JsonObject format = formats.getObject(i);
+            if (format == null
+                    || format.getString("url", null) == null
+                    || !format.getString("mimeType", "").startsWith("video/mp4")
+                    || !format.getString("mimeType", "").contains("avc")) {
+                continue;
+            }
+            final int height = format.getInt("height", 0);
+            if (height > 0 && !heights.contains(height)) {
+                heights.add(height);
+            }
+        }
     }
 
     /** Higher bitrate (audio) or height+fps (video) wins; ties keep the first. */

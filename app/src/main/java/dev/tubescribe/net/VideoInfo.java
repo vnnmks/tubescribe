@@ -1,5 +1,6 @@
 package dev.tubescribe.net;
 
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -18,7 +19,24 @@ public record VideoInfo(
         String audioUrl,
         int height,
         int fps,
-        String qualityLabel) {
+        String qualityLabel,
+        List<Integer> videoHeights,
+        int wantedHeight) {
+
+    /** @return the available-quality caption, e.g. "1080p / 720p / 360p". */
+    public String availableLabel() {
+        if (videoHeights == null) {
+            return "";
+        }
+        final StringBuilder text = new StringBuilder();
+        for (final Integer height : videoHeights) {
+            if (text.length() > 0) {
+                text.append(" / ");
+            }
+            text.append(height).append('p');
+        }
+        return text.toString();
+    }
 
     private static final Pattern RESOLUTION = Pattern.compile("(\\d{3,4})");
 
