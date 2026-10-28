@@ -3,6 +3,7 @@ package dev.tubescribe.transcribe;
 import com.grack.nanojson.JsonArray;
 import com.grack.nanojson.JsonObject;
 import com.grack.nanojson.JsonParser;
+import dev.tubescribe.TubeApp;
 import dev.tubescribe.subs.SubtitleCue;
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.Fmt;
@@ -35,10 +36,16 @@ import java.util.logging.Logger;
  * several seconds of context around every seam, so no word is cut off there.
  * Each chunk is posted as multipart form data with
  * {@code response_format=verbose_json} so segments carry chunk-relative
- * timestamps. Cue transcription ownership is resolved by time: only segments
- * starting inside the chunk's exclusive territory are kept, and the accepted
- * tail text of each chunk conditions the next request as Whisper's
- * {@code prompt}, keeping voice and formatting continuous across seams.
+ * timestamps. Cue transcription ownership is a clean partition by chunk file
+ * ends: each chunk keeps only segments starting after the previous chunk's
+ * file ends, which hands the seam region to the previous chunk (whose
+ * transcription of that audio is anchored inside a stable file) and avoids
+ * the misattributed first segments whisper produces at the head of a file,
+ * especially with a {@code prompt}. Segments of that unreliable head zone
+ * that run well past the previous chunk's file end are bridged back in from
+ * that point, covering audio the previous chunk could not hear. The accepted
+ * tail text is sent as that {@code prompt}, keeping voice and formatting
+ * continuous across seams.
  * All configured API keys are tried in order: rate limits move the request
  * to the next key and rejected keys are retired for the rest of the session.</p>
  */
@@ -53,6 +60,19 @@ public final class GroqTranscriber {
     /** Segments starting this close to the last accepted cue end are treated
      * as timing-jitter duplicates of audio already transcribed. */
     private static final double DUPLICATE_SLACK_SEC = 0.05;
+    /** A segment that starts in the head zone (before the ownership floor)
+     * extends at least this far past the floor to count as a seam bridge:
+     * shorter runs are just the same sentence's jitter, which the previous
+     * chunk already transcribed from a stable position. */
+    private static final double BRIDGE_MIN_EXTEND_SEC = 2.5;
+    /** Bridges shorter than this are not worth a cue. */
+    private static final double BRIDGE_MIN_SPAN_SEC = 1.0;
+    /** Earliest a following owned segment may start relative to the bridge
+     * it follows, so the dup rule does not swallow real speech. */
+    private static final double BRIDGE_GUARD_SEC = 0.15;
+    /** Upper bound on a bridge span; a stretch artefact longer than this
+     * carries no trustworthy timing at all. */
+    private static final double BRIDGE_CAP_SEC = 30.0;
     /** Tail text handed to the next request as Whisper's prompt continuation. */
     private static final int PROMPT_CHARS = 200;
 
@@ -88,6 +108,7 @@ public final class GroqTranscriber {
         final int total = chunks.size();
         double acceptedEndSec = 0;
         String prompt = null;
+        final boolean verbose = debugLoggingEnabled();
         for (int i = 0; i < total; i++) {
             cancel.throwIfCancelled();
             final dev.tubescribe.media.AudioChunker.Chunk chunk = chunks.get(i);
@@ -96,13 +117,31 @@ public final class GroqTranscriber {
             listener.update(i / (double) total,
                     "Groq chunk " + (i + 1) + "/" + total + " · uploading "
                             + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
+            if (verbose) {
+                LOG.info("Groq chunk " + (i + 1) + "/" + total + ": container "
+                        + Fmt.time(offset) + "–" + Fmt.time(chunkEnd)
+                        + " (duration " + Fmt.time(chunk.durationUs() / 1_000_000.0)
+                        + "), prompt=" + (prompt == null ? "none" : prompt.length() + " chars"));
+            }
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
                     prompt, keys, listener, i, total, cancel);
-            acceptedEndSec = parseCues(body, offset,
-                    chunk.authStartUs() / 1_000_000.0,
-                    chunk.authEndUs() == Long.MAX_VALUE ? Double.MAX_VALUE
-                            : chunk.authEndUs() / 1_000_000.0,
-                    cues, acceptedEndSec);
+            // Cue ownership by file-end partitioning: a chunk transcribes its
+            // own head overlap (the previous chunk's tail) plus its first in-
+            // territory window with unreliable timestamps — whisper orients
+            // over the first seconds of a file and, prompted by the previous
+            // chunk's tail text, smears several sentences into a stretched
+            // first segment there (measured ~30 s segments). The previous
+            // chunk heard that same audio from well inside a stable file, so
+            // it keeps the seam region, and this chunk's transcript is only
+            // trusted from where the previous chunk's file ends — except for
+            // a floor-dropped segment running past it, which bridges the
+            // gap left where the previous chunk's file ended mid-sentence
+            // (see parseCues).
+            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY
+                    : (chunks.get(i - 1).startUs() + chunks.get(i - 1).durationUs())
+                    / 1_000_000.0;
+            acceptedEndSec = parseCues(body, offset, startFloorSec,
+                    cues, acceptedEndSec, verbose, (i + 1) + "/" + total);
             prompt = promptTail(cues);
             listener.update((i + 1) / (double) total,
                     "Groq chunk " + (i + 1) + "/" + total + " · transcribed ("
@@ -274,25 +313,35 @@ public final class GroqTranscriber {
     // ------------------------------------------------------------------ parsing
 
     /**
-     * Converts one chunk's response into cues, keeping only segments inside
-     * the chunk's exclusive territory.
+     * Converts one chunk's response into cues, keeping only segments starting
+     * at or after the chunk's ownership floor (the previous chunk's file end),
+     * plus a seam bridge for floor-dropped segments that run past it.
+     *
      * @param offset         global PTS of the chunk's first sample (seconds)
-     * @param authStartSec   territory start; segments starting before it were
-     *                       transcribed by the previous chunk as well
-     * @param authEndSec     territory end; segments starting at or after it
-     *                       will be transcribed by the next chunk as well
+     * @param startFloorSec  segments starting before it belong to the previous
+     *                       chunk's transcription (which heard them from inside
+     *                       a stable file); {@code -inf} for the first chunk
      * @param acceptedEndSec end of the last cue accepted so far; segments
      *                       starting inside it are timing-jitter duplicates
+     * @param verbose        debug-logging gate (each segment + drop reason)
+     * @param tag            chunk position label, e.g. {@code 2/5}
      * @return the updated end of the last accepted cue
      */
     private double parseCues(final String body, final double offset,
-                             final double authStartSec, final double authEndSec,
-                             final List<SubtitleCue> cues, final double acceptedEndSec)
+                             final double startFloorSec,
+                             final List<SubtitleCue> cues, final double acceptedEndSec,
+                             final boolean verbose, final String tag)
             throws IOException {
         double latestEnd = acceptedEndSec;
         try {
             final JsonObject json = JsonParser.object().from(body);
             final JsonArray segments = json.getArray("segments");
+            if (verbose) {
+                LOG.info("Groq " + tag + ": offset=" + Fmt.time(offset) + " ownership from "
+                        + (startFloorSec < 0 ? "00:00" : Fmt.time(startFloorSec))
+                        + ", whisper duration=" + Fmt.time(json.getDouble("duration", -1))
+                        + ", text=" + clip(json.getString("text", ""), 40));
+            }
             if (segments == null || segments.isEmpty()) {
                 // No segment timestamps: the top-level text covers the chunk.
                 // For chunks that overlap their neighbors this fallback is
@@ -300,12 +349,50 @@ public final class GroqTranscriber {
                 // carries the same audio.
                 final String text = json.getString("text", "").strip();
                 final double duration = json.getDouble("duration", 30.0);
-                if (!text.isEmpty() && ownedByThisChunk(offset, offset + duration,
-                        authStartSec, authEndSec, latestEnd)) {
+                if (!text.isEmpty() && startFloorSec < offset && acceptedEndSec <= offset) {
                     cues.add(new SubtitleCue(offset, offset + duration, text));
                     latestEnd = Math.max(latestEnd, offset + duration);
                 }
                 return latestEnd;
+            }
+            // Pass 1 (chunked transcriptions after the first): find a seam
+            // bridge. A segment that starts below the ownership floor but ends
+            // well past it covers audio the previous chunk could not
+            // transcribe — its file ended mid-sentence at the floor. Admit
+            // that audio from the floor on, clipped before the first owned
+            // segment so the dup rule cannot swallow the speech that follows.
+            if (!Double.isInfinite(startFloorSec)) {
+                double firstOwnedStart = -1;
+                double bridgeEnd = -1;
+                String bridgeText = "";
+                for (int s = 0; s < segments.size(); s++) {
+                    final JsonObject segment = segments.getObject(s);
+                    final double start = offset + Math.max(0, segment.getDouble("start", 0));
+                    final double end = offset + Math.max(0, segment.getDouble("end", 0));
+                    if (start >= startFloorSec) {
+                        if (firstOwnedStart < 0) {
+                            firstOwnedStart = start;
+                        }
+                    } else if (end > startFloorSec + BRIDGE_MIN_EXTEND_SEC
+                            && end > bridgeEnd) {
+                        bridgeEnd = end;
+                        bridgeText = segment.getString("text", "").strip();
+                    }
+                }
+                double clipped = bridgeEnd < 0 ? -1
+                        : Math.min(bridgeEnd, startFloorSec + BRIDGE_CAP_SEC);
+                if (firstOwnedStart > 0) {
+                    clipped = Math.min(clipped, firstOwnedStart - BRIDGE_GUARD_SEC);
+                }
+                if (!bridgeText.isEmpty() && clipped - startFloorSec >= BRIDGE_MIN_SPAN_SEC) {
+                    if (verbose) {
+                        LOG.info("Groq " + tag + " bridge: " + Fmt.time(startFloorSec)
+                                + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160));
+                    }
+                    cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
+                            startFloorSec, clipped - startFloorSec, bridgeText));
+                    latestEnd = Math.max(latestEnd, clipped);
+                }
             }
             for (int i = 0; i < segments.size(); i++) {
                 final JsonObject segment = segments.getObject(i);
@@ -315,7 +402,16 @@ public final class GroqTranscriber {
                 if (text.isEmpty()) {
                     continue;
                 }
-                if (!ownedByThisChunk(start, end, authStartSec, authEndSec, latestEnd)) {
+                final boolean owned = start >= startFloorSec;
+                final boolean duplicate = latestEnd > 0
+                        && start < latestEnd - DUPLICATE_SLACK_SEC;
+                if (verbose) {
+                    LOG.info("Groq " + tag + " seg " + (i + 1) + ": " + Fmt.time(start)
+                            + "–" + Fmt.time(end) + " | " + clip(text, 48)
+                            + (owned ? "" : " [FLOOR-DROP]")
+                            + (duplicate ? " [DUP-DROP]" : ""));
+                }
+                if (!owned || duplicate) {
                     continue;
                 }
                 // Split long segments so the subtitle overlay stays readable.
@@ -329,15 +425,18 @@ public final class GroqTranscriber {
         return latestEnd;
     }
 
-    /** Whether a returned segment belongs to this chunk's exclusive territory:
-     * subjects of the neighboring chunks' overlap copies are dropped, as are
-     * segments whose start repeats audio already inside an accepted cue. */
-    private static boolean ownedByThisChunk(final double start, final double end,
-                                            final double authStartSec, final double authEndSec,
-                                            final double acceptedEndSec) {
-        if (start < authStartSec || start >= authEndSec) {
+    /** Short single-line text prefix for debug logs. */
+    private static String clip(final String text, final int max) {
+        final String flat = text.replaceAll("\\s+", " ").strip();
+        return flat.length() <= max ? flat : flat.substring(0, max) + "…";
+    }
+
+    /** Verbose segment logging only while the debug chunk limit is active. */
+    private static boolean debugLoggingEnabled() {
+        try {
+            return TubeApp.debugChunkLimit() > 0;
+        } catch (final RuntimeException ignored) {
             return false;
         }
-        return !(acceptedEndSec > 0 && start < acceptedEndSec - DUPLICATE_SLACK_SEC);
     }
 }

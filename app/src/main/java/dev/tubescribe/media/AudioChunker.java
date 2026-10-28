@@ -34,9 +34,9 @@ import java.util.logging.Logger;
  * more {@link #OVERLAP_US} window, and the next chunk then seeks back to one
  * window before the seam. Whisper therefore always hears several seconds of
  * context around every cut, which keeps sentences and words at the boundary
- * intact; cue ownership between the two overlapping transcriptions is decided
- * by timestamp in {@code GroqTranscriber} using {@link Chunk#authStartUs()}
- * and {@link Chunk#authEndUs()}, so the shared audio never appears twice.</p>
+ * intact; cue ownership between the overlapping transcriptions is decided
+ * by clean file-end partitioning in {@code GroqTranscriber}, so the shared
+ * audio never appears twice.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
