@@ -41,8 +41,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -53,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,11 +69,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -479,69 +478,20 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 fontWeight = FontWeight.Medium,
                                 color = Color.White
                             )
-                            Slider(
-                                value = (if (seeking) seekTargetMs else positionMs)
-                                    .coerceIn(0L, durationMs.coerceAtLeast(0L)).toFloat(),
-                                onValueChange = {
-                                    seekTargetMs = it.toLong()
+                            SeekBar(
+                                positionMs = (if (seeking) seekTargetMs else positionMs)
+                                    .coerceIn(0L, durationMs.coerceAtLeast(0L)),
+                                durationMs = durationMs.coerceAtLeast(0L),
+                                onSeekPreview = {
+                                    seekTargetMs = it
                                     seeking = true
                                 },
-                                onValueChangeFinished = {
+                                onSeekCommit = {
                                     player.seekTo(seekTargetMs)
                                     seeking = false
                                 },
-                                valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1f)),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color.Red,
-                                    activeTrackColor = Color.Red,
-                                    inactiveTrackColor = Color.Red.copy(alpha = 0.4f)
-                                ),
-                                thumb = {
-                                    SliderDefaults.Thumb(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        thumbSize = DpSize(12.dp, 12.dp),
-                                        colors = SliderDefaults.colors(
-                                            thumbColor = Color.Red
-                                        )
-                                    )
-                                },
-                                track = { sliderState ->
-                                    // Hairline red track, no stop dots, no thumb gap —
-                                    // matches the reference: 03:36 ———●——— 06:59.
-                                    val range = sliderState.valueRange
-                                    val fraction = if (range.endInclusive > range.start) {
-                                        ((sliderState.value - range.start) /
-                                            (range.endInclusive - range.start))
-                                            .coerceIn(0f, 1f)
-                                    } else {
-                                        0f
-                                    }
-                                    Canvas(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .height(3.dp)
-                                    ) {
-                                        val stroke = size.height
-                                        val y = size.height / 2f
-                                        drawLine(
-                                            color = Color.Red.copy(alpha = 0.4f),
-                                            start = Offset(0f, y),
-                                            end = Offset(size.width, y),
-                                            strokeWidth = stroke,
-                                            cap = StrokeCap.Round
-                                        )
-                                        drawLine(
-                                            color = Color.Red,
-                                            start = Offset(0f, y),
-                                            end = Offset(size.width * fraction, y),
-                                            strokeWidth = stroke,
-                                            cap = StrokeCap.Round
-                                        )
-                                    }
-                                },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(24.dp)
                                     .padding(horizontal = 6.dp)
                             )
                             Text(
@@ -711,5 +661,85 @@ private fun shareSubtitles(context: Context, kind: String, videoId: String, trac
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(send, "Share subtitles"))
+    }
+}
+
+// ------------------------------------------------------------------ seek bar
+// Hand-rolled NewPipe-style bar. Track and dot are drawn on ONE canvas, so the
+// dot is always dead-centered on the line — Material's Slider places its thumb
+// and a custom track slot independently, which let the dot drift ~1dp off.
+// Tap anywhere jumps there; dragging scrubs (preview value, commit on release).
+@Composable
+private fun SeekBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeekPreview: (Long) -> Unit,
+    onSeekCommit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var widthPx by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    val dotPx = with(density) { 10.dp.toPx() }
+    val strokePx = with(density) { 2.5.dp.toPx() }
+    val fraction = if (durationMs > 0) {
+        (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+    fun targetAt(x: Float): Long {
+        val f = (x / widthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return (f * durationMs).toLong()
+    }
+
+    Box(
+        modifier
+            .height(32.dp)
+            .onSizeChanged { widthPx = it.width.toFloat() }
+            .pointerInput(durationMs) {
+                detectTapGestures(
+                    onTap = { offset ->
+                        onSeekPreview(targetAt(offset.x))
+                        onSeekCommit()
+                    }
+                )
+            }
+            .pointerInput(durationMs) {
+                detectDragGestures(
+                    onDragStart = { offset -> onSeekPreview(targetAt(offset.x)) },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        onSeekPreview(targetAt(change.position.x))
+                    },
+                    onDragEnd = { onSeekCommit() },
+                    onDragCancel = { onSeekCommit() }
+                )
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val y = size.height / 2f
+            val halfDot = dotPx / 2f
+            val dotX = (size.width * fraction).coerceIn(halfDot, size.width - halfDot)
+            drawLine(
+                color = Color.Red.copy(alpha = 0.4f),
+                start = Offset(0f, y),
+                end = Offset(size.width, y),
+                strokeWidth = strokePx,
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = Color.Red,
+                start = Offset(0f, y),
+                end = Offset(dotX, y),
+                strokeWidth = strokePx,
+                cap = StrokeCap.Round
+            )
+            drawCircle(
+                color = Color.Red,
+                radius = halfDot,
+                center = Offset(dotX, y)
+            )
+        }
     }
 }
