@@ -126,25 +126,21 @@ public final class GroqTranscriber {
             }
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
                     prompt, keys, listener, i, total, cancel);
-            // Cue ownership for overlapping chunk geometry: partition by file
-            // ends — the previous chunk transcribed [offset, prev file end)
-            // from inside a stable file, while whisper orients over the first
-            // seconds of every file and, prompted by the previous chunk's
-            // tail text, smears several sentences into a stretched first
-            // segment there (measured ~30 s segments). So nothing before the
-            // previous chunk's file end is kept, except a floor-dropped
-            // segment running past it, which bridges the gap where the
-            // previous chunk's file ended mid-sentence (see parseCues).
-            // Back-to-back non-overlapping chunks leave every head wholly
-            // untranscribed by any neighbor, so keep everything.
-            final double prevFileEndSec = i == 0 ? Double.NEGATIVE_INFINITY
+            // Cue ownership by file-end partitioning: a chunk transcribes its
+            // own head overlap (the previous chunk's tail) plus its first in-
+            // territory window with unreliable timestamps — whisper orients
+            // over the first seconds of a file and, prompted by the previous
+            // chunk's tail text, smears several sentences into a stretched
+            // first segment there (measured ~30 s segments). The previous
+            // chunk heard that same audio from well inside a stable file, so
+            // it keeps the seam region, and this chunk's transcript is only
+            // trusted from where the previous chunk's file ends — except for
+            // a floor-dropped segment running past it, which bridges the
+            // gap left where the previous chunk's file ended mid-sentence
+            // (see parseCues).
+            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY
                     : (chunks.get(i - 1).startUs() + chunks.get(i - 1).durationUs())
                     / 1_000_000.0;
-            // A container's duration runs a sample frame past its nominal
-            // end, so detect overlap with a tolerance well above that yet
-            // far below the 20 s overlap window.
-            final double startFloorSec = prevFileEndSec > offset + 1.0
-                    ? prevFileEndSec : Double.NEGATIVE_INFINITY;
             acceptedEndSec = parseCues(body, offset, startFloorSec,
                     cues, acceptedEndSec, verbose, (i + 1) + "/" + total);
             prompt = promptTail(cues);
@@ -348,7 +344,7 @@ public final class GroqTranscriber {
      * @param tag            chunk position label, e.g. {@code 2/5}
      * @return the updated end of the last accepted cue
      */
-    private double parseCues(final String body, final double offset,
+    double parseCues(final String body, final double offset,      // visible for tests
                              final double startFloorSec,
                              final List<SubtitleCue> cues, final double acceptedEndSec,
                              final boolean verbose, final String tag)
@@ -425,6 +421,12 @@ public final class GroqTranscriber {
                     latestEnd = Math.max(latestEnd, clipped);
                 }
             }
+            // Pass 2: decide ownership, drop duplicates, and mark the owned
+            // time window.
+            double ownedFrom = -1;
+            double ownedTo = -1;
+            double acceptedThrough = latestEnd;
+            final List<Integer> owned = new ArrayList<>();
             for (int i = 0; i < segments.size(); i++) {
                 final JsonObject segment = segments.getObject(i);
                 final double start = offset + Math.max(0, segment.getDouble("start", 0));
@@ -433,30 +435,53 @@ public final class GroqTranscriber {
                 if (text.isEmpty()) {
                     continue;
                 }
-                final boolean owned = start >= startFloorSec;
-                final boolean duplicate = latestEnd > 0
-                        && start < latestEnd - DUPLICATE_SLACK_SEC;
+                final boolean mine = start >= startFloorSec;
+                final boolean duplicate = acceptedThrough > 0
+                        && start < acceptedThrough - DUPLICATE_SLACK_SEC;
                 if (verbose) {
                     LOG.info("Groq " + tag + " seg " + (i + 1) + ": " + Fmt.time(start)
                             + "–" + Fmt.time(end) + " | " + clip(text, 48)
-                            + (owned ? "" : " [FLOOR-DROP]")
+                            + (mine ? "" : " [FLOOR-DROP]")
                             + (duplicate ? " [DUP-DROP]" : ""));
                 }
-                if (!owned || duplicate) {
+                if (!mine || duplicate) {
                     continue;
                 }
-                // The spoken words carry their own timestamps and drive cue
-                // timing directly; character-share splitting is only the
-                // fallback when whisper returned no word list.
-                final List<dev.tubescribe.subs.CueBuilder.WordSpan> segWords =
-                        wordSpans(words, offset, start - 0.02, end + 0.02);
-                if (segWords.isEmpty()) {
+                owned.add(i);
+                if (ownedFrom < 0 || start < ownedFrom) {
+                    ownedFrom = start;
+                }
+                ownedTo = Math.max(ownedTo, end);
+                acceptedThrough = Math.max(acceptedThrough, end);
+            }
+            // Cue building runs once over every owned word in the territory
+            // instead of once per segment: whisper's segment cuts sit
+            // mid-sentence, so a straddling word lands in the previous
+            // segment's word window while its phrase continues in the next;
+            // grouping there strands it in a one-word cue that flashes by
+            // unreadably. One continuous pass keeps phrases whole, and the
+            // spoken words still drive cue timing directly.
+            final List<dev.tubescribe.subs.CueBuilder.WordSpan> ownedWords = ownedFrom < 0
+                    ? List.of()
+                    : wordSpans(words, offset, ownedFrom - 0.02, ownedTo + 0.02);
+            if (!ownedWords.isEmpty()) {
+                cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(ownedWords));
+                latestEnd = Math.max(latestEnd, ownedTo);
+            } else {
+                // Character-share fallback: no word list came back (or none
+                // inside the owned territory), so split each owned segment's
+                // text by character count as before.
+                for (final int i : owned) {
+                    final JsonObject segment = segments.getObject(i);
+                    final double start = offset + Math.max(0, segment.getDouble("start", 0));
+                    final double end = offset + Math.max(0, segment.getDouble("end", 0));
+                    final String text = segment.getString("text", "").strip();
                     cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
                             start, Math.max(end, start + 0.4) - start, text));
-                } else {
-                    cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(segWords));
                 }
-                latestEnd = Math.max(latestEnd, end);
+                if (ownedFrom >= 0) {
+                    latestEnd = Math.max(latestEnd, ownedTo);
+                }
             }
         } catch (final com.grack.nanojson.JsonParserException e) {
             throw new IOException("Groq returned an unreadable response: " + e.getMessage(), e);

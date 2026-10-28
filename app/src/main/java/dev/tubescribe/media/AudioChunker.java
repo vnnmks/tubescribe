@@ -29,17 +29,14 @@ import java.util.logging.Logger;
  * approach Groq's 25 MB upload limit, so even hour-long videos cost only a
  * couple of seconds of file copying here.</p>
  *
- * <p>By default consecutive chunks overlap: when a chunk's exclusive
- * territory reaches the byte budget, the seam location is noted but writing
- * continues for one more {@link #OVERLAP_US} window, and the next chunk then
- * seeks back to one window before the seam. Whisper therefore always hears
- * several seconds of context around every cut, which keeps sentences and
- * words at the boundary intact; cue ownership between the overlapping
- * transcriptions is decided by clean file-end partitioning in
- * {@code GroqTranscriber}, so the shared audio never appears twice. The
- * home-screen "Overlap audio chunks" toggle switches this off for
- * back-to-back chunks, in which case the transcriber keeps every chunk's own
- * head since no neighboring chunk hears it.</p>
+ * <p>Consecutive chunks overlap: when a chunk's exclusive territory reaches
+ * the byte budget, the seam location is noted but writing continues for one
+ * more {@link #OVERLAP_US} window, and the next chunk then seeks back to one
+ * window before the seam. Whisper therefore always hears several seconds of
+ * context around every cut, which keeps sentences and words at the boundary
+ * intact; cue ownership between the overlapping transcriptions is decided
+ * by clean file-end partitioning in {@code GroqTranscriber}, so the shared
+ * audio never appears twice.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
@@ -80,9 +77,6 @@ public final class AudioChunker {
             throw new MediaException("The audio source file is missing or empty: " + media);
         }
         final long limitBytes = chunkLimitBytes();
-        final boolean overlap = chunkOverlapEnabled();
-        final long overlapUs = overlap ? OVERLAP_US : 0L;
-        LOG.info("AudioChunker: seam overlap " + (overlap ? "on" : "off"));
         MediaExtractor extractor = null;
         MediaMuxer muxer = null;
         File chunkFile = null;
@@ -133,15 +127,18 @@ public final class AudioChunker {
                 // chunk. Writing continues for one more overlap window first.
                 if (territoryEndUs < 0 && territoryBytes > 0 && territoryBytes + size
                         > territoryBudgetBytes(limitBytes, territoryBytes,
-                        pts - authStartUs, overlap)) {
+                        pts - authStartUs)) {
                     territoryEndUs = pts;
                     LOG.info("AudioChunker: seam after " + Fmt.time(authStartUs / 1_000_000.0)
                             + "–" + Fmt.time(territoryEndUs / 1_000_000.0));
                 }
 
-                if (territoryEndUs >= 0 && pts - territoryEndUs >= overlapUs) {
-                    // The chunk is complete. Close it and start the next one
-                    // with this sample.
+                if (territoryEndUs >= 0 && pts - territoryEndUs >= OVERLAP_US) {
+                    // The full tail overlap window is written. Close the chunk
+                    // and rewind so the next chunk begins one window before the
+                    // seam; both files then contain the complete seam region.
+                    // Capture the seek target first: the resets below clear the
+                    // state it is computed from.
                     final long seekUs = Math.max(0, territoryEndUs - OVERLAP_US);
                     closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, territoryEndUs);
                     muxer = null;
@@ -152,17 +149,10 @@ public final class AudioChunker {
                     territoryBytes = 0;
                     chunkBytes = 0;
                     haveSample = false;
-                    if (overlapUs > 0) {
-                        // Rewind: the next chunk begins one window before the
-                        // seam, so both files contain the complete seam region.
-                        // Drop this buffer: the rewind re-delivers the region,
-                        // and the sample is written again when its time comes.
-                        extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-                        continue;
-                    }
-                    // Overlap off: chunks tile back-to-back. Keep streaming —
-                    // this sample (the first past the seam) belongs to the
-                    // fresh chunk.
+                    // Drop this buffer: the rewind re-delivers the region and
+                    // the sample is written again when its time comes.
+                    extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    continue;
                 }
 
                 if (muxer == null) {
@@ -249,7 +239,7 @@ public final class AudioChunker {
     // ------------------------------------------------------------- utilities
 
     /** Effective per-chunk byte limit; a debug preference can shrink it to
-     * force multiple chunks on short test media. */
+     * force multiple overlapping chunks on short test media. */
     private static long chunkLimitBytes() {
         try {
             final long debug = TubeApp.debugChunkLimit();
@@ -264,29 +254,12 @@ public final class AudioChunker {
     }
 
     /**
-     * User toggle read from the home screen: whether consecutive chunks
-     * share a seam window. When off, chunks tile back-to-back and the
-     * transcriber must keep every chunk's own head.
-     */
-    private static boolean chunkOverlapEnabled() {
-        try {
-            return TubeApp.chunkOverlapEnabled();
-        } catch (final RuntimeException ignored) {
-            // App context not attached (unit tests): keep the seam context.
-            return true;
-        }
-    }
-
-    /**
-     * Byte budget for one chunk's exclusive territory. With overlap on, both
-     * overlap windows ride on top of it and must still fit inside the upload
-     * limit, so the budget is the limit minus two overlap margins.
+     * Byte budget for one chunk's exclusive territory. Both overlap windows
+     * ride on top of it and must still fit inside the upload limit, so the
+     * budget is the limit minus two overlap margins.
      */
     private static long territoryBudgetBytes(final long limitBytes, final long territoryBytes,
-                                             final long spanUs, final boolean overlap) {
-        if (!overlap) {
-            return Math.max(MIN_CHUNK_BYTES, limitBytes);
-        }
+                                             final long spanUs) {
         return Math.max(MIN_CHUNK_BYTES, limitBytes - 2 * overlapMarginBytes(
                 limitBytes, territoryBytes, spanUs));
     }

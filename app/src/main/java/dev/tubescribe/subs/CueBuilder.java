@@ -74,6 +74,13 @@ public final class CueBuilder {
     /** Short word-timed cues are held up to this long so fast phrases do not
      * flash; never past the next cue's start. */
     private static final double MIN_HOLD_SEC = 1.6;
+    /** Extra characters a fold may add on top of {@link #MAX_CHARS}: one
+     * stranded word may push a full cue one word past the two-line target
+     * rather than flash by as a one-word subtitle. */
+    private static final int FOLD_SLACK_CHARS = 16;
+    /** A fold may stretch a cue this far past {@link #MAX_CUE_SECONDS} to
+     * absorb a stranded neighbor word. */
+    private static final double FOLD_SLACK_SEC = 2.0;
 
     /**
      * Builds cues from whisper's word-level timestamps, so every cue is on
@@ -110,6 +117,45 @@ public final class CueBuilder {
         if (!cleaned.isEmpty() && groupEnd > groupStart) {
             built.add(new SubtitleCue(groupStart, groupEnd, cleaned));
         }
+        // Whisper strands the occasional single word as its own cue: a size
+        // or pause flush fires right before it, and the next pause (or the
+        // end of the word list) cuts it off behind. A one-word subtitle
+        // flashes by too fast to read, so fold it into a neighbor — backward
+        // when the previous cue can absorb it, otherwise forward when it
+        // opens the batch.
+        final List<SubtitleCue> folded = new ArrayList<>(built.size());
+        for (int i = 0; i < built.size(); i++) {
+            final SubtitleCue cue = built.get(i);
+            if (cue.text().split("\\s+").length > 1) {
+                folded.add(cue);
+                continue;
+            }
+            if (!folded.isEmpty()) {
+                final SubtitleCue prev = folded.get(folded.size() - 1);
+                if (prev.text().length() + 1 + cue.text().length()
+                        <= MAX_CHARS + FOLD_SLACK_CHARS
+                        && cue.end() - prev.start() <= MAX_CUE_SECONDS + FOLD_SLACK_SEC) {
+                    folded.set(folded.size() - 1, new SubtitleCue(prev.start(), cue.end(),
+                            prev.text() + ' ' + cue.text()));
+                    continue;
+                }
+                folded.add(cue);
+                continue;
+            }
+            final SubtitleCue next = i + 1 < built.size() ? built.get(i + 1) : null;
+            if (next != null
+                    && cue.text().length() + 1 + next.text().length()
+                    <= MAX_CHARS + FOLD_SLACK_CHARS
+                    && next.end() - cue.start() <= MAX_CUE_SECONDS + FOLD_SLACK_SEC) {
+                folded.add(new SubtitleCue(cue.start(), next.end(),
+                        cue.text() + ' ' + next.text()));
+                i++;
+                continue;
+            }
+            folded.add(cue);
+        }
+        built.clear();
+        built.addAll(folded);
         // Hold briefly on very short cues; never past the next cue's start.
         for (int i = 0; i < built.size(); i++) {
             final SubtitleCue cue = built.get(i);

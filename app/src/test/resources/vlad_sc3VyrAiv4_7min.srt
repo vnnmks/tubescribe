@@ -1,0 +1,280 @@
+1
+00:00:00,160 --> 00:00:05,480
+Hi, beautiful micro-philosophical community. It's about six of you who want me to answer
+
+2
+00:00:05,500 --> 00:00:10,520
+the following questions. I'm going to try to take five, seven minutes to give it a whirl.
+
+3
+00:00:10,980 --> 00:00:16,320
+And that's, is it okay for a public intellectual to write with AI?
+
+4
+00:00:20,460 --> 00:00:27,620
+Let's completely exclude the sort of obvious case of just generating what
+
+5
+00:00:28,600 --> 00:00:30,260
+feels like AI slop.
+
+6
+00:00:31,600 --> 00:00:37,400
+So the house wasn't big, the house wasn't expansive, it was monumental.
+
+7
+00:00:38,060 --> 00:00:42,540
+All of these 77 kind of moves that we all really recognize.
+
+8
+00:00:44,240 --> 00:00:48,240
+Let's also put out of the equation somebody who just writes themselves but then throws
+
+9
+00:00:48,260 --> 00:00:54,720
+what they've written into AI to check the grammar or to get any new ideas about
+
+10
+00:00:54,740 --> 00:00:56,660
+what might be missing.
+
+11
+00:00:58,640 --> 00:01:03,960
+So we're really talking about somebody who is in a very clever way using AI, such that
+
+12
+00:01:03,980 --> 00:01:10,160
+nobody's going to tell, such that it's going to pass all of the AI recognition tests,
+
+13
+00:01:10,180 --> 00:01:16,680
+but the writing is essentially intertwined with AI in the sense that an AI produces a
+
+14
+00:01:16,700 --> 00:01:21,900
+sentence and then the author alters it to their taste and then shoves it into their piece.
+
+15
+00:01:22,720 --> 00:01:26,660
+What do we think about that? And what are the ethics of that?
+
+16
+00:01:29,720 --> 00:01:36,420
+I think the main thing you lose is access to the unconscious
+
+17
+00:01:36,440 --> 00:01:43,340
+mind. What you completely lose there is the situation of
+
+18
+00:01:43,360 --> 00:01:50,280
+a combination of words emanating out of the unconscious mind of the author onto the
+
+19
+00:01:50,300 --> 00:01:56,700
+page in a way that the author absolutely intends but does not exist.
+
+20
+00:02:00,445 --> 00:02:06,265
+Because when you interact with AI as you write you're putting yourself into the space
+
+21
+00:02:06,285 --> 00:02:12,625
+of conscious intent which is the shallow kind of intent that unless it engages some kind
+
+22
+00:02:12,645 --> 00:02:16,805
+of menial piece of technical writing is not going to produce good writing.
+
+23
+00:02:18,505 --> 00:02:24,892
+And when you lose this access to the unconscious mind and therefore
+
+24
+00:02:24,912 --> 00:02:31,812
+intent in its main literary form,
+
+25
+00:02:31,832 --> 00:02:38,372
+which is to say intent that means that there's a psychological reality in the
+
+26
+00:02:38,392 --> 00:02:44,732
+author and that somehow that is converted onto markings on the page
+
+27
+00:02:44,752 --> 00:02:51,472
+in a way that the author absolutely intends but is not under his or her conscience. that's
+
+28
+00:02:51,492 --> 00:02:57,592
+what you lose. so the problem here is that of course authorial intent is essentially
+
+29
+00:02:57,612 --> 00:03:03,552
+the main concept in literature as an art.
+
+30
+00:03:03,572 --> 00:03:10,372
+now you might say is that less
+
+31
+00:03:10,392 --> 00:03:15,572
+important if one is writing a piece of political analysis rather than fiction or rather
+
+32
+00:03:15,592 --> 00:03:20,612
+than a properly stylized work of philosophy? yeah, shock matters less. You're going to
+
+33
+00:03:20,632 --> 00:03:26,172
+lose a lot less civilization if Applebaum starts writing her pieces for the Atlantic
+
+34
+00:03:26,192 --> 00:03:32,828
+with AI than if whoever you might consider the leading living novelist.
+
+35
+00:03:32,848 --> 00:03:37,328
+writing with the help of AI going forward.
+
+36
+00:03:38,848 --> 00:03:43,148
+So you're going to lose the concept of a total intent, which is the main
+
+37
+00:03:43,168 --> 00:03:49,968
+concept in Western literature. You
+
+38
+00:03:49,988 --> 00:03:55,128
+also then by extension going to lose concept of style. So
+
+39
+00:03:55,148 --> 00:04:01,796
+style are those non-shallower features that
+
+40
+00:04:01,816 --> 00:04:07,216
+define the way a writer works,
+
+41
+00:04:07,236 --> 00:04:13,656
+that can never be reduced to a set of surface signatures, right,
+
+42
+00:04:13,676 --> 00:04:17,916
+but are always seen in the work. I mean, let me try to give you a couple of examples
+
+43
+00:04:17,936 --> 00:04:23,756
+in a somewhat lame way from my own writing because I sort of half think I have a style
+
+44
+00:04:23,776 --> 00:04:28,416
+of my own as a philosophical writer, but I only quarter have a style of my own as a public
+
+45
+00:04:28,436 --> 00:04:29,296
+intellectual writer.
+
+46
+00:04:31,096 --> 00:04:36,676
+So, but even with my public intellectual writing, there is a little bit of
+
+47
+00:04:36,696 --> 00:04:43,396
+stylistic quality there. So what's that like? Well, it's going to have 11 or
+
+48
+00:04:43,416 --> 00:04:44,856
+29 features.
+
+49
+00:04:46,696 --> 00:04:53,616
+Or which one could be that I tend to
+
+50
+00:04:53,636 --> 00:04:58,976
+put human activities occurring in our culture
+
+51
+00:04:58,996 --> 00:05:06,496
+with a level of simplicity and directness that
+
+52
+00:05:10,252 --> 00:05:16,572
+the effect of making people who read this put this activity in the
+
+53
+00:05:16,592 --> 00:05:22,692
+context of the full possibilities of history and human nature. So
+
+54
+00:05:22,712 --> 00:05:28,512
+when I write something about what Kemi Beidnock is doing, the leader of the Conservative
+
+55
+00:05:28,612 --> 00:05:31,612
+I'm going to have a lot of work on the way to do it. party in the UK. I'll write it in
+
+56
+00:05:31,632 --> 00:05:37,922
+such a way that even without you being consciously aware of it, it might trigger in you
+
+57
+00:05:37,942 --> 00:05:42,682
+the thought, well, how would a political actor have handled this 500 years ago?
+
+58
+00:05:45,662 --> 00:05:51,642
+So, I am not consciously aware I'm doing that, and yet I am.
+
+59
+00:05:51,662 --> 00:05:58,482
+Now, I can talk about it when I'm not doing it, but when I am
+
+60
+00:05:58,502 --> 00:06:05,302
+doing it, it's going to have a degree of unconscious
+
+61
+00:06:05,322 --> 00:06:10,982
+control, if you like. And if I completely made that control conscious, then the effect
+
+62
+00:06:11,002 --> 00:06:15,542
+wouldn't quite work. Actually, it'd be too mechanical and it wouldn't have the successful
+
+63
+00:06:15,562 --> 00:06:22,402
+transmission to the reader. Because if
+
+64
+00:06:22,422 --> 00:06:26,542
+I'm too conscious in the way I control it, what will happen is that the reader thinks,
+
+65
+00:06:26,562 --> 00:06:32,122
+oh, Vlad is trying to make me think that. Whereas if I do it with the unconscious, the
+
+66
+00:06:32,142 --> 00:06:36,482
+reader is actually more likely to think, oh, suddenly I'm thinking of this as I read
+
+67
+00:06:36,502 --> 00:06:43,482
+this. How interesting. And that's the effect of a successfully realized
+
+68
+00:06:45,622 --> 00:06:50,722
+intent that is untransparent to the conscious mind and stylistic.
+
+69
+00:06:50,742 --> 00:06:57,202
+That's the beginning of that conversation? I mean, does
+
+70
+00:06:57,222 --> 00:06:59,742
+that give you a couple of cents? Lots of love.
+
