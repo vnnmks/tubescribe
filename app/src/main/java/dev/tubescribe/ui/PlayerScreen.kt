@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -56,14 +59,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
@@ -71,12 +79,14 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import dev.tubescribe.TubeApp
 import dev.tubescribe.subs.SubtitleCue
 import dev.tubescribe.subs.SubtitleTrack
 import dev.tubescribe.util.Fmt
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -133,6 +143,66 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    // ------------------------------------------- draggable subtitle overlay
+    var videoSize by remember { mutableStateOf(IntSize.Zero) }
+    var subsSize by remember { mutableStateOf(IntSize.Zero) }
+    // User-placed position (top-left, px) and whether the user placed it at all.
+    var subsPlaced by remember { mutableStateOf(TubeApp.subtitlePlaced) }
+    var placedPos by remember { mutableStateOf(Offset.Zero) }
+    // Effective rendered position; always kept inside the video box.
+    var renderPos by remember { mutableStateOf(Offset.Zero) }
+    var overlayMeasured by remember { mutableStateOf(false) }
+    var restoredOnce by remember { mutableStateOf(false) }
+
+    // Compute the rendered position every frame: default (bottom center) until the
+    // user drags; afterwards the placed position, clamped to stay on the video.
+    if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
+        val insetPx = with(androidx.compose.ui.platform.LocalDensity.current) {
+            (if (controlsVisible && !subsPlaced) 92.dp else 12.dp).toPx()
+        }
+        val target =
+            if (subsPlaced && restoredOnce) {
+                placedPos
+            } else {
+                Offset(
+                    (videoSize.width - subsSize.width) / 2f,
+                    (videoSize.height - subsSize.height) - insetPx
+                )
+            }
+        val clamped = Offset(
+            target.x.coerceIn(0f, (videoSize.width - subsSize.width).coerceAtLeast(0).toFloat()),
+            target.y.coerceIn(0f, (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat())
+        )
+        if (clamped != renderPos) {
+            renderPos = clamped
+        }
+        if (!overlayMeasured) {
+            overlayMeasured = true
+        }
+    }
+
+    // Restore the saved position once sizes are known.
+    LaunchedEffect(videoSize, subsSize) {
+        if (!overlayMeasured || restoredOnce || !subsPlaced) return@LaunchedEffect
+        restoredOnce = true
+        placedPos = Offset(
+            TubeApp.subtitleCenterX * videoSize.width - subsSize.width / 2f,
+            TubeApp.subtitleCenterY * videoSize.height - subsSize.height / 2f
+        )
+    }
+
+    // Persist the overlay's center as a fraction of the video area so the
+    // placement also fits videos of other sizes.
+    val persistSubtitlePos = {
+        if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
+            TubeApp.subtitlePlaced = true
+            TubeApp.subtitleCenterX =
+                (renderPos.x + subsSize.width / 2f) / videoSize.width
+            TubeApp.subtitleCenterY =
+                (renderPos.y + subsSize.height / 2f) / videoSize.height
+        }
+    }
 
     LaunchedEffect(currentIndex, autoFollow) {
         if (autoFollow && currentIndex >= 0) {
@@ -219,6 +289,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                     .fillMaxWidth()
                     .height(240.dp)
                     .background(Color.Black)
+                    .onSizeChanged { videoSize = it }
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -345,8 +416,42 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                 if (subsOn && currentIndex >= 0) {
                     Box(
                         Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = if (controlsVisible) 92.dp else 12.dp)
+                            .align(Alignment.TopStart)
+                            .offset {
+                                IntOffset(renderPos.x.roundToInt(), renderPos.y.roundToInt())
+                            }
+                            .onSizeChanged { subsSize = it }
+                            .pointerInput(videoSize, subsSize) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        // Pick up from wherever it currently renders.
+                                        subsPlaced = true
+                                        restoredOnce = true
+                                        placedPos = renderPos
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        val maxX =
+                                            (videoSize.width - subsSize.width).coerceAtLeast(0).toFloat()
+                                        val maxY =
+                                            (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat()
+                                        placedPos = Offset(
+                                            (placedPos.x + dragAmount.x).coerceIn(0f, maxX),
+                                            (placedPos.y + dragAmount.y).coerceIn(0f, maxY)
+                                        )
+                                        renderPos = placedPos
+                                    },
+                                    onDragEnd = { persistSubtitlePos() },
+                                    onDragCancel = { persistSubtitlePos() }
+                                )
+                            }
+                            .pointerInput(Unit) {
+                                // Long-press resets to the default bottom-center spot.
+                                detectTapGestures(onLongPress = {
+                                    subsPlaced = false
+                                    TubeApp.subtitlePlaced = false
+                                })
+                            }
                     ) {
                         SubtitleOverlay(cue = track.cues()[currentIndex])
                     }

@@ -72,4 +72,24 @@ object TubeApp {
         set(value) {
             prefs.edit().putString("url", value).apply()
         }
+
+    /** Whether the user has manually placed the subtitle overlay on the video. */
+    var subtitlePlaced: Boolean
+        get() = prefs.getBoolean("subs_placed", false)
+        set(value) {
+            prefs.edit().putBoolean("subs_placed", value).apply()
+        }
+
+    /** Subtitle overlay center as a fraction of the video area (survives restarts). */
+    var subtitleCenterX: Float
+        get() = prefs.getFloat("subs_cx", 0.5f)
+        set(value) {
+            prefs.edit().putFloat("subs_cx", value).apply()
+        }
+
+    var subtitleCenterY: Float
+        get() = prefs.getFloat("subs_cy", 0.85f)
+        set(value) {
+            prefs.edit().putFloat("subs_cy", value).apply()
+        }
 }
