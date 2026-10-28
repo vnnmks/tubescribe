@@ -5,7 +5,9 @@ import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 
+import dev.tubescribe.TubeApp;
 import dev.tubescribe.util.Cancellation;
+import dev.tubescribe.util.Fmt;
 import dev.tubescribe.util.ProgressListener;
 
 import java.io.File;
@@ -23,22 +25,49 @@ import java.util.logging.Logger;
  * part of the pipeline entirely (measured ~58 s per 7 min of audio on a
  * mid-range phone, dominated by per-packet cross-process MediaCodec calls).
  *
- * <p>The chunks are cut at sample boundaries once the accumulated sample
- * bytes approach Groq's 25 MB upload limit, so even hour-long videos cost
- * only a couple of seconds of file copying here.</p>
+ * <p>Chunks are cut at sample boundaries once the accumulated sample bytes
+ * approach Groq's 25 MB upload limit, so even hour-long videos cost only a
+ * couple of seconds of file copying here.</p>
+ *
+ * <p>Consecutive chunks overlap: when a chunk's exclusive territory reaches
+ * the byte budget, the seam location is noted but writing continues for one
+ * more {@link #OVERLAP_US} window, and the next chunk then seeks back to one
+ * window before the seam. Whisper therefore always hears several seconds of
+ * context around every cut, which keeps sentences and words at the boundary
+ * intact; cue ownership between the two overlapping transcriptions is decided
+ * by timestamp in {@code GroqTranscriber} using {@link Chunk#authStartUs()}
+ * and {@link Chunk#authEndUs()}, so the shared audio never appears twice.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
 
     /** Stay safely under Groq's 25 MB upload limit (25,000,000 bytes). */
     public static final long MAX_CHUNK_BYTES = 24_000_000L;
+    /** Smallest sane exclusive territory so tiny debug limits still work. */
+    private static final long MIN_CHUNK_BYTES = 128 * 1024;
+    /** Audio kept on both sides of every chunk seam, so whisper has context. */
+    public static final long OVERLAP_US = 20_000_000L;
+    /** Safety factor for the estimated overlap bytes (VBR headroom). */
+    private static final double OVERLAP_SAFETY = 1.5;
     private static final int SAMPLE_BUFFER_BYTES = 256 * 1024;
 
     private AudioChunker() {
     }
 
-    /** One uploadable audio file plus the audio duration it covers. */
-    public record Chunk(File file, long durationUs) {
+    /**
+     * One uploadable audio file and the timeline positions it covers.
+     *
+     * @param file        the chunk written to disk
+     * @param startUs     global PTS of the chunk's first audio sample; segment
+     *                    timestamps returned for this file are offsets from here
+     * @param authStartUs exclusive territory start (the previous seam); segments
+     *                    starting before it also exist in the previous chunk
+     * @param authEndUs   exclusive territory end (the next seam); segments
+     *                    starting at or after it also exist in the next chunk
+     * @param durationUs  container duration, for progress labels only
+     */
+    public record Chunk(File file, long startUs, long authStartUs, long authEndUs,
+                        long durationUs) {
     }
 
     public static List<Chunk> split(final File media, final File cacheDir,
@@ -47,6 +76,7 @@ public final class AudioChunker {
         if (!media.isFile() || media.length() < 1024) {
             throw new MediaException("The audio source file is missing or empty: " + media);
         }
+        final long limitBytes = chunkLimitBytes();
         MediaExtractor extractor = null;
         MediaMuxer muxer = null;
         File chunkFile = null;
@@ -66,9 +96,19 @@ public final class AudioChunker {
             final MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             final long totalBytes = media.length();
             long processed = 0;
-            long chunkBytes = 0;
             int index = 0;
             int lastPercent = -1;
+
+            // Current chunk state. The chunk file covers, in global timeline
+            // time: one head overlap window, its exclusive territory, then one
+            // tail overlap window. startUs is the real first sample's PTS, so
+            // timestamps stay exact even when a seek lands on a sync frame.
+            long chunkStartUs = 0;
+            long authStartUs = 0;     // previous seam; 0 for the first chunk
+            long territoryEndUs = -1; // declared seam of this chunk; -1 = undecided
+            long territoryBytes = 0;  // bytes inside the territory (no head overlap)
+            long chunkBytes = 0;      // every byte written to this chunk so far
+            boolean haveSample = false;
 
             while (true) {
                 cancel.throwIfCancelled();
@@ -80,28 +120,62 @@ public final class AudioChunker {
                 if (size > SAMPLE_BUFFER_BYTES) {
                     throw new MediaException("An audio sample is larger than the chunk buffer.");
                 }
-                if (chunkBytes > 0 && chunkBytes + size > MAX_CHUNK_BYTES) {
-                    closeChunk(muxer, chunkFile, chunks);
-                    muxer = null;
-                    chunkBytes = 0;
+                final long pts = extractor.getSampleTime();
+
+                // A territory ends where the byte budget would next be
+                // exceeded: the sample about to be written starts the next
+                // chunk. Writing continues for one more overlap window first.
+                if (territoryEndUs < 0 && territoryBytes > 0 && territoryBytes + size
+                        > territoryBudgetBytes(limitBytes, territoryBytes, pts - authStartUs)) {
+                    territoryEndUs = pts;
+                    LOG.info("AudioChunker: seam after " + Fmt.time(authStartUs / 1_000_000.0)
+                            + "–" + Fmt.time(territoryEndUs / 1_000_000.0));
                 }
+
+                if (territoryEndUs >= 0 && pts - territoryEndUs >= OVERLAP_US) {
+                    // The full tail overlap window is written. Close the chunk
+                    // and rewind so the next chunk begins one window before the
+                    // seam; both files then contain the complete seam region.
+                    closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, territoryEndUs);
+                    muxer = null;
+                    chunkFile = null;
+                    extractor.seekTo(Math.max(0, territoryEndUs - OVERLAP_US),
+                            MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    index++;
+                    authStartUs = territoryEndUs;
+                    territoryEndUs = -1;
+                    territoryBytes = 0;
+                    chunkBytes = 0;
+                    haveSample = false;
+                    // Drop this buffer: the rewind re-delivers the region and
+                    // the sample is written again when its time comes.
+                    continue;
+                }
+
                 if (muxer == null) {
                     chunkFile = new File(cacheDir, String.format(Locale.ROOT,
-                            "groq-%04d.m4a", index++));
+                            "groq-%04d.m4a", index));
                     muxer = new MediaMuxer(chunkFile.getAbsolutePath(),
                             MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
                     muxerTrack = muxer.addTrack(format);
                     muxer.start();
                 }
+                if (!haveSample) {
+                    chunkStartUs = pts;
+                    haveSample = true;
+                }
                 info.offset = 0;
                 info.size = size;
-                info.presentationTimeUs = extractor.getSampleTime();
+                info.presentationTimeUs = pts;
                 info.flags = extractor.getSampleFlags();
                 muxer.writeSampleData(muxerTrack, buffer, info);
                 chunkBytes += size;
+                if (pts >= authStartUs && (territoryEndUs < 0 || pts < territoryEndUs)) {
+                    territoryBytes += size;
+                }
                 processed += size;
                 extractor.advance();
-                final int percent = (int) (processed * 100 / totalBytes);
+                final int percent = (int) Math.min(99, processed * 100 / totalBytes);
                 if (percent >= lastPercent + 2) {
                     lastPercent = percent;
                     listener.update(Math.min(0.99, processed / (double) totalBytes),
@@ -109,7 +183,17 @@ public final class AudioChunker {
                 }
             }
             if (muxer != null) {
-                closeChunk(muxer, chunkFile, chunks);
+                if (haveSample) {
+                    // The final chunk's territory runs to the end of the audio.
+                    closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, Long.MAX_VALUE);
+                } else {
+                    // The audio ended inside the previous chunk's tail window,
+                    // so this rewound chunk would duplicate covered audio.
+                    safeStop(muxer);
+                    release(muxer);
+                    //noinspection ResultOfMethodCallIgnored
+                    chunkFile.delete();
+                }
                 muxer = null;
             }
         } catch (final IOException | RuntimeException e) {
@@ -136,17 +220,59 @@ public final class AudioChunker {
             deleteAll(chunks, null);
             throw new MediaException("The audio track contains no samples.");
         }
-        long totalUs = 0;
-        for (final Chunk chunk : chunks) {
-            totalUs += chunk.durationUs();
+        for (int i = 0; i < chunks.size(); i++) {
+            final Chunk chunk = chunks.get(i);
+            LOG.info("AudioChunker: chunk " + (i + 1) + "/" + chunks.size() + " covers "
+                    + Fmt.time(chunk.startUs() / 1_000_000.0) + "–"
+                    + Fmt.time((chunk.startUs() + chunk.durationUs()) / 1_000_000.0)
+                    + ", territory " + (chunk.authEndUs() == Long.MAX_VALUE ? "end"
+                    : Fmt.time(chunk.authEndUs() / 1_000_000.0)));
         }
-        LOG.info("AudioChunker: " + media.getName() + " -> " + chunks.size()
-                + " chunk(s), " + Math.round(totalUs / 1_000_000.0) + "s of audio, "
+        LOG.info("AudioChunker: " + media.getName() + " -> " + chunks.size() + " chunk(s), "
                 + media.length() / 1024 + "KB total");
         return chunks;
     }
 
     // ------------------------------------------------------------- utilities
+
+    /** Effective per-chunk byte limit; a debug preference can shrink it to
+     * force multiple overlapping chunks on short test media. */
+    private static long chunkLimitBytes() {
+        try {
+            final long debug = TubeApp.debugChunkLimit();
+            if (debug > 0) {
+                LOG.info("AudioChunker: debug chunk limit " + (debug / 1024) + "KB");
+                return Math.min(debug, MAX_CHUNK_BYTES);
+            }
+        } catch (final RuntimeException ignored) {
+            // App context not attached (unit tests): use the production limit.
+        }
+        return MAX_CHUNK_BYTES;
+    }
+
+    /**
+     * Byte budget for one chunk's exclusive territory. Both overlap windows
+     * ride on top of it and must still fit inside the upload limit, so the
+     * budget is the limit minus two overlap margins.
+     */
+    private static long territoryBudgetBytes(final long limitBytes, final long territoryBytes,
+                                             final long spanUs) {
+        return Math.max(MIN_CHUNK_BYTES, limitBytes - 2 * overlapMarginBytes(
+                limitBytes, territoryBytes, spanUs));
+    }
+
+    /** Estimated sample bytes in one overlap window at the measured audio rate. */
+    private static long overlapMarginBytes(final long limitBytes, final long bytes,
+                                           final long spanUs) {
+        long margin = MIN_CHUNK_BYTES; // fallback until a rate can be measured
+        if (spanUs > 1_000_000 && bytes > 0) {
+            final double bytesPerSec = bytes / (spanUs / 1_000_000.0);
+            margin = Math.round(bytesPerSec * (OVERLAP_US / 1_000_000.0) * OVERLAP_SAFETY);
+        }
+        // Never let both margins together eat more than half the (debug) limit.
+        final long maxMargin = Math.max(64 * 1024, (limitBytes - MIN_CHUNK_BYTES) / 2);
+        return Math.min(margin, maxMargin);
+    }
 
     private static int selectAudioTrack(final MediaExtractor extractor) {
         for (int i = 0; i < extractor.getTrackCount(); i++) {
@@ -160,10 +286,11 @@ public final class AudioChunker {
     }
 
     private static void closeChunk(final MediaMuxer muxer, final File file,
-                                   final List<Chunk> chunks) throws IOException {
+                                   final List<Chunk> chunks, final long startUs,
+                                   final long authStartUs, final long authEndUs) throws IOException {
         muxer.stop();
         muxer.release();
-        chunks.add(new Chunk(file, queryDuration(file)));
+        chunks.add(new Chunk(file, startUs, authStartUs, authEndUs, queryDuration(file)));
     }
 
     /** Duration of the audio track as written into the chunk's container. */

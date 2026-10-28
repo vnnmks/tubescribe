@@ -92,4 +92,13 @@ object TubeApp {
         set(value) {
             prefs.edit().putFloat("subs_cy", value).apply()
         }
+
+    /**
+     * Debug-only override for the audio chunk byte limit (0 = production
+     * limit). A small forced limit makes [dev.tubescribe.media.AudioChunker]
+     * split even short audio into many overlapping chunks, so the seam
+     * handling can be exercised on a short test video.
+     */
+    @JvmStatic
+    fun debugChunkLimit(): Long = prefs.getLong("debug_chunk_bytes", 0L)
 }

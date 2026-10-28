@@ -31,11 +31,16 @@ import java.util.logging.Logger;
  *
  * <p>Audio arrives as pre-split {@code .m4a} chunks (see
  * {@link dev.tubescribe.media.AudioChunker}), each below the 25 MB upload
- * limit. Each chunk is posted as multipart form data with
- * {@code response_format=verbose_json} so segments carry absolute-in-chunk
- * timestamps, which are then offset by the chunk start. All configured API
- * keys are tried in order: rate limits move the request to the next key and
- * rejected keys are retired for the rest of the session.</p>
+ * limit, and consecutive chunks deliberately overlap: Whisper always hears
+ * several seconds of context around every seam, so no word is cut off there.
+ * Each chunk is posted as multipart form data with
+ * {@code response_format=verbose_json} so segments carry chunk-relative
+ * timestamps. Cue transcription ownership is resolved by time: only segments
+ * starting inside the chunk's exclusive territory are kept, and the accepted
+ * tail text of each chunk conditions the next request as Whisper's
+ * {@code prompt}, keeping voice and formatting continuous across seams.
+ * All configured API keys are tried in order: rate limits move the request
+ * to the next key and rejected keys are retired for the rest of the session.</p>
  */
 public final class GroqTranscriber {
     private static final Logger LOG = Logger.getLogger(GroqTranscriber.class.getName());
@@ -45,6 +50,11 @@ public final class GroqTranscriber {
 
     private static final long RETRY_BACKOFF_MS = 2_000;
     private static final int MAX_SAME_KEY_RETRIES = 2;
+    /** Segments starting this close to the last accepted cue end are treated
+     * as timing-jitter duplicates of audio already transcribed. */
+    private static final double DUPLICATE_SLACK_SEC = 0.05;
+    /** Tail text handed to the next request as Whisper's prompt continuation. */
+    private static final int PROMPT_CHARS = 200;
 
     private final OkHttpClient client = buildClient();
     private final List<String> keys;
@@ -76,22 +86,27 @@ public final class GroqTranscriber {
                 + chunks.size() + " chunk(s)");
         final List<SubtitleCue> cues = new ArrayList<>();
         final int total = chunks.size();
-        long offsetUs = 0;
+        double acceptedEndSec = 0;
+        String prompt = null;
         for (int i = 0; i < total; i++) {
             cancel.throwIfCancelled();
             final dev.tubescribe.media.AudioChunker.Chunk chunk = chunks.get(i);
-            final double offset = offsetUs / 1_000_000.0;
-            final double chunkEnd = (offsetUs + chunk.durationUs()) / 1_000_000.0;
+            final double offset = chunk.startUs() / 1_000_000.0;
+            final double chunkEnd = (chunk.startUs() + chunk.durationUs()) / 1_000_000.0;
             listener.update(i / (double) total,
                     "Groq chunk " + (i + 1) + "/" + total + " · uploading "
                             + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
-                    keys, listener, i, total, cancel);
-            parseCues(body, offset, cues);
+                    prompt, keys, listener, i, total, cancel);
+            acceptedEndSec = parseCues(body, offset,
+                    chunk.authStartUs() / 1_000_000.0,
+                    chunk.authEndUs() == Long.MAX_VALUE ? Double.MAX_VALUE
+                            : chunk.authEndUs() / 1_000_000.0,
+                    cues, acceptedEndSec);
+            prompt = promptTail(cues);
             listener.update((i + 1) / (double) total,
                     "Groq chunk " + (i + 1) + "/" + total + " · transcribed ("
                             + cues.size() + " cues so far)");
-            offsetUs += chunk.durationUs();
         }
 
         listener.update(1.0, "Transcription complete");
@@ -101,10 +116,40 @@ public final class GroqTranscriber {
         return cues;
     }
 
+    /**
+     * The last {@value #PROMPT_CHARS} characters of accepted transcript text,
+     * fed to the next request as Whisper's {@code prompt} so chunks continue
+     * in the same voice and formatting instead of starting from scratch.
+     * Returns {@code null} while nothing has been accepted yet.
+     */
+    private static String promptTail(final List<SubtitleCue> cues) {
+        if (cues.isEmpty()) {
+            return null;
+        }
+        final StringBuilder tail = new StringBuilder();
+        for (int i = cues.size() - 1; i >= 0 && tail.length() < 2 * PROMPT_CHARS; i--) {
+            final String text = cues.get(i).text().strip();
+            if (text.isEmpty()) {
+                continue;
+            }
+            if (tail.length() > 0) {
+                tail.insert(0, ' ');
+            }
+            tail.insert(0, text);
+        }
+        final String result = tail.toString().strip();
+        if (result.isEmpty()) {
+            return null;
+        }
+        return result.length() > PROMPT_CHARS
+                ? result.substring(result.length() - PROMPT_CHARS) : result;
+    }
+
     // ------------------------------------------------------------------ upload
 
     private String uploadChunk(final Path file, final double startSec, final double endSec,
-                               final List<String> keys, final ProgressListener listener,
+                               final String prompt, final List<String> keys,
+                               final ProgressListener listener,
                                final int chunk, final int total,
                                final Cancellation cancel) throws IOException {
         final Set<Integer> dead = new HashSet<>();
@@ -120,18 +165,20 @@ public final class GroqTranscriber {
             final String masked = "key#" + (index + 1);
             try {
                 final RequestBody fileBody = RequestBody.create(file.toFile(), AUDIO_M4A);
-                final MultipartBody form = new MultipartBody.Builder()
+                final MultipartBody.Builder form = new MultipartBody.Builder()
                         .setType(MultipartBody.FORM)
                         .addFormDataPart("model", MODEL_ID)
                         .addFormDataPart("response_format", "verbose_json")
                         .addFormDataPart("temperature", "0")
-                        .addFormDataPart("file", "audio.m4a", fileBody)
-                        .build();
+                        .addFormDataPart("file", "audio.m4a", fileBody);
+                if (prompt != null && !prompt.isBlank()) {
+                    form.addFormDataPart("prompt", prompt);
+                }
                 final Request request = new Request.Builder()
                         .url(ENDPOINT)
                         .header("Authorization", "Bearer " + key)
                         .header("Accept", "application/json")
-                        .post(form)
+                        .post(form.build())
                         .build();
                 listener.update((chunk + 0.45) / total,
                         "Groq chunk " + (chunk + 1) + "/" + total + " · transcribing via " + masked);
@@ -226,18 +273,39 @@ public final class GroqTranscriber {
 
     // ------------------------------------------------------------------ parsing
 
-    private void parseCues(final String body, final double offset,
-                           final List<SubtitleCue> cues) throws IOException {
+    /**
+     * Converts one chunk's response into cues, keeping only segments inside
+     * the chunk's exclusive territory.
+     * @param offset         global PTS of the chunk's first sample (seconds)
+     * @param authStartSec   territory start; segments starting before it were
+     *                       transcribed by the previous chunk as well
+     * @param authEndSec     territory end; segments starting at or after it
+     *                       will be transcribed by the next chunk as well
+     * @param acceptedEndSec end of the last cue accepted so far; segments
+     *                       starting inside it are timing-jitter duplicates
+     * @return the updated end of the last accepted cue
+     */
+    private double parseCues(final String body, final double offset,
+                             final double authStartSec, final double authEndSec,
+                             final List<SubtitleCue> cues, final double acceptedEndSec)
+            throws IOException {
+        double latestEnd = acceptedEndSec;
         try {
             final JsonObject json = JsonParser.object().from(body);
             final JsonArray segments = json.getArray("segments");
             if (segments == null || segments.isEmpty()) {
+                // No segment timestamps: the top-level text covers the chunk.
+                // For chunks that overlap their neighbors this fallback is
+                // dropped entirely — the overlap both neighbors transcribed
+                // carries the same audio.
                 final String text = json.getString("text", "").strip();
-                if (!text.isEmpty()) {
-                    final double duration = json.getDouble("duration", 30.0);
+                final double duration = json.getDouble("duration", 30.0);
+                if (!text.isEmpty() && ownedByThisChunk(offset, offset + duration,
+                        authStartSec, authEndSec, latestEnd)) {
                     cues.add(new SubtitleCue(offset, offset + duration, text));
+                    latestEnd = Math.max(latestEnd, offset + duration);
                 }
-                return;
+                return latestEnd;
             }
             for (int i = 0; i < segments.size(); i++) {
                 final JsonObject segment = segments.getObject(i);
@@ -247,12 +315,29 @@ public final class GroqTranscriber {
                 if (text.isEmpty()) {
                     continue;
                 }
+                if (!ownedByThisChunk(start, end, authStartSec, authEndSec, latestEnd)) {
+                    continue;
+                }
                 // Split long segments so the subtitle overlay stays readable.
                 cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
                         start, Math.max(end, start + 0.4) - start, text));
+                latestEnd = Math.max(latestEnd, end);
             }
         } catch (final com.grack.nanojson.JsonParserException e) {
             throw new IOException("Groq returned an unreadable response: " + e.getMessage(), e);
         }
+        return latestEnd;
+    }
+
+    /** Whether a returned segment belongs to this chunk's exclusive territory:
+     * subjects of the neighboring chunks' overlap copies are dropped, as are
+     * segments whose start repeats audio already inside an accepted cue. */
+    private static boolean ownedByThisChunk(final double start, final double end,
+                                            final double authStartSec, final double authEndSec,
+                                            final double acceptedEndSec) {
+        if (start < authStartSec || start >= authEndSec) {
+            return false;
+        }
+        return !(acceptedEndSec > 0 && start < acceptedEndSec - DUPLICATE_SLACK_SEC);
     }
 }
