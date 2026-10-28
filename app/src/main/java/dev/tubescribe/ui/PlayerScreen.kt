@@ -492,7 +492,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .padding(horizontal = 6.dp)
+                                    .padding(horizontal = 12.dp)
                             )
                             Text(
                                 Fmt.barClock(durationMs / 1000.0),
@@ -526,7 +526,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
