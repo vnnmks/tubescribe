@@ -7,6 +7,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -65,6 +66,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -170,9 +172,12 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
 
     // Compute the rendered position every frame: default (bottom center) until the
     // user drags; afterwards the placed position, clamped to stay on the video.
+    // The inset is CONSTANT — it must never depend on controls visibility, or the
+    // subtitle would jump every time the progress bar opens/hides. When the bar
+    // overlaps the subtitle, the bar simply draws on top of it.
     if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
         val insetPx = with(androidx.compose.ui.platform.LocalDensity.current) {
-            (if (controlsVisible && !subsPlaced) 92.dp else 12.dp).toPx()
+            12.dp.toPx()
         }
         val target =
             if (subsPlaced && restoredOnce) {
@@ -303,6 +308,97 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                     .height(240.dp)
                     .background(Color.Black)
                     .onSizeChanged { videoSize = it }
+                    .pointerInput(Unit) {
+                        // Subtitle drag + long-press reset, living on the VIDEO BOX and
+                        // running on the Initial pass. The Initial pass reaches this
+                        // ancestor BEFORE the child layers below (tap surface, CC
+                        // button, seek bar) process the same touch in the Main pass,
+                        // so consuming here starves them — that is what lets the pill
+                        // be dragged even when it sits under the progress bar.
+                        // Plain taps stay unconsumed so the controls keep working
+                        // through the pill (YouTube-style).
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                pass = PointerEventPass.Initial,
+                                requireUnconsumed = false
+                            )
+                            // Is the touch inside the pill (video-local coordinates)?
+                            val onPill = subsSize.width > 0 &&
+                                down.position.x >= renderPos.x &&
+                                down.position.x <= renderPos.x + subsSize.width &&
+                                down.position.y >= renderPos.y &&
+                                down.position.y <= renderPos.y + subsSize.height
+                            if (!onPill) return@awaitEachGesture
+                            var start = down.position
+                            var lastPos = start
+                            var drag = false
+                            var releasedEarly = false
+                            // Decide inside the long-press window: released early ->
+                            // plain tap (fall through to controls); moved beyond slop ->
+                            // drag; window expired -> long press.
+                            val decision = withTimeoutOrNull(
+                                viewConfiguration.longPressTimeoutMillis
+                            ) {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val pressed = event.changes.firstOrNull { it.pressed }
+                                    if (pressed == null) {
+                                        releasedEarly = true
+                                        break
+                                    }
+                                    val pos = pressed.position
+                                    if ((pos - start).getDistance() >
+                                        viewConfiguration.touchSlop
+                                    ) {
+                                        drag = true
+                                        lastPos = pos
+                                        break
+                                    }
+                                }
+                            }
+                            when {
+                                drag -> {
+                                    // Pill drag: pick up from wherever it renders and
+                                    // claim the whole gesture.
+                                    subsPlaced = true
+                                    restoredOnce = true
+                                    placedPos = renderPos
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        event.changes.forEach { it.consume() }
+                                        val pressed = event.changes.firstOrNull { it.pressed }
+                                        if (pressed == null) break
+                                        val pos = pressed.position
+                                        val maxX = (videoSize.width - subsSize.width)
+                                            .coerceAtLeast(0).toFloat()
+                                        val maxY = (videoSize.height - subsSize.height)
+                                            .coerceAtLeast(0).toFloat()
+                                        placedPos = Offset(
+                                            (placedPos.x + (pos.x - lastPos.x))
+                                                .coerceIn(0f, maxX),
+                                            (placedPos.y + (pos.y - lastPos.y))
+                                                .coerceIn(0f, maxY)
+                                        )
+                                        lastPos = pos
+                                        renderPos = placedPos
+                                    }
+                                    persistSubtitlePos()
+                                }
+                                decision == null && !releasedEarly -> {
+                                    // Long press: reset to the default bottom-center spot
+                                    // and swallow the rest of the gesture so no tap
+                                    // leaks to the controls below.
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        event.changes.forEach { it.consume() }
+                                        if (event.changes.none { it.pressed }) break
+                                    }
+                                    subsPlaced = false
+                                    TubeApp.subtitlePlaced = false
+                                }
+                            }
+                        }
+                    }
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -349,63 +445,18 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 IntOffset(renderPos.x.roundToInt(), renderPos.y.roundToInt())
                             }
                             .onSizeChanged { subsSize = it }
-                            .pointerInput(videoSize, subsSize) {
-                                detectDragGestures(
-                                    onDragStart = {
-                                        // Pick up from wherever it currently renders.
-                                        subsPlaced = true
-                                        restoredOnce = true
-                                        placedPos = renderPos
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        val maxX =
-                                            (videoSize.width - subsSize.width).coerceAtLeast(0).toFloat()
-                                        val maxY =
-                                            (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat()
-                                        placedPos = Offset(
-                                            (placedPos.x + dragAmount.x).coerceIn(0f, maxX),
-                                            (placedPos.y + dragAmount.y).coerceIn(0f, maxY)
-                                        )
-                                        renderPos = placedPos
-                                    },
-                                    onDragEnd = { persistSubtitlePos() },
-                                    onDragCancel = { persistSubtitlePos() }
-                                )
-                            }
-                            .pointerInput(Unit) {
-                                // Long-press resets to the default bottom-center spot.
-                                // Hand-rolled (instead of detectTapGestures) so ordinary
-                                // taps are NOT consumed here: the overlay may sit on top
-                                // of the CC / play buttons or the slider, and those must
-                                // stay tappable through it.
-                                awaitEachGesture {
-                                    // awaitEachGesture only enters after a pointer
-                                    // went down, so no explicit awaitFirstDown here.
-                                    var intercepted = false
-                                    val completed = withTimeoutOrNull(
-                                        viewConfiguration.longPressTimeoutMillis
-                                    ) {
-                                        while (true) {
-                                            val event = awaitPointerEvent()
-                                            if (event.changes.any { it.isConsumed }) {
-                                                // A drag took over; leave it alone.
-                                                intercepted = true
-                                                break
-                                            }
-                                            if (event.changes.none { it.pressed }) break
-                                        }
-                                    }
-                                    if (completed == null && !intercepted) {
-                                        // Long press fired: swallow the rest of the
-                                        // gesture so no tap leaks to the controls below.
-                                        awaitPointerEvent().changes.forEach { it.consume() }
-                                        subsPlaced = false
-                                        TubeApp.subtitlePlaced = false
-                                    }
-                                }
-                            }
+                            // NOTE: no pointerInput here — the pill's drag/long-press
+                            // handling lives on the video Box above (Initial pass), so
+                            // it wins over the seek bar / tap surface even when the pill
+                            // sits under the progress bar.
                     ) {
+                        // Reset the remembered pill size when the pill leaves
+                        // composition (between cues) — otherwise the stale size
+                        // keeps the positioning block and the drag hit-test acting
+                        // on a pill that is no longer on screen.
+                        DisposableEffect(Unit) {
+                            onDispose { subsSize = IntSize.Zero }
+                        }
                         SubtitleOverlay(cue = track.cues()[currentIndex])
                     }
                 }
@@ -583,16 +634,14 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
 
 @Composable
 private fun SubtitleOverlay(cue: SubtitleCue) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(bottom = 52.dp),
-        contentAlignment = Alignment.BottomCenter
-    ) {
+    // The container must WRAP the visible pill exactly: this Box's size is what
+    // the drag clamp uses. A full-width/taller container would (a) lock the
+    // horizontal drag (clamped to 0) and (b) reserve dead space above the video
+    // bottom, so the pill could never be dragged under the progress bar.
+    Box(contentAlignment = Alignment.Center) {
         Surface(
             color = Color.Black.copy(alpha = 0.6f),
-            shape = RoundedCornerShape(6.dp),
-            modifier = Modifier.padding(horizontal = 14.dp)
+            shape = RoundedCornerShape(6.dp)
         ) {
             Text(
                 cue.text(),
