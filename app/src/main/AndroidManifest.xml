@@ -12,10 +12,12 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="false">
 
+        <!-- Handle rotation in Compose so the player keeps playing through fullscreen. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

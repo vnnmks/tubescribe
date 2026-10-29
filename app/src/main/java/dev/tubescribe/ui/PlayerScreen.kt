@@ -1,8 +1,17 @@
 package dev.tubescribe.ui
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.database.ContentObserver
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,6 +40,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -69,6 +80,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -81,6 +93,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -100,16 +115,80 @@ import kotlin.math.roundToInt
 fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val activity = remember(context) { context.findActivity() }
+
+    // Fullscreen is driven by the device orientation while auto-rotate is on,
+    // and by the maximize/restore button while it is off.
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val autoRotate = rememberAutoRotateEnabled()
+    var manualFullscreen by rememberSaveable { mutableStateOf(false) }
+    val fullscreen = if (autoRotate) isLandscape else manualFullscreen
+
+    // Keep the playback position across activity recreation (e.g. a rotation
+    // on devices that still recreate despite configChanges).
+    var restorePositionMs by rememberSaveable { mutableLongStateOf(0L) }
 
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(Uri.fromFile(File(args.mediaPath))))
             playWhenReady = true
             prepare()
+            if (restorePositionMs > 0L) seekTo(restorePositionMs)
         }
     }
     DisposableEffect(Unit) {
-        onDispose { player.release() }
+        onDispose {
+            player.release()
+            // Never leave the rest of the app locked in the player's
+            // fullscreen orientation or with hidden system bars.
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.window?.let { window ->
+                WindowCompat.getInsetsController(window, window.decorView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    // Auto-rotate takes over the screen orientation as soon as it is enabled.
+    // If it is switched off while we are already in landscape, keep the
+    // fullscreen view and expose the restore button instead of snapping back.
+    LaunchedEffect(autoRotate) {
+        if (autoRotate) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            manualFullscreen = false
+        } else if (isLandscape) {
+            manualFullscreen = true
+        }
+    }
+
+    // A manually expanded video stays landscape until the restore button (or
+    // Back) is used, including after the activity is recreated.
+    LaunchedEffect(manualFullscreen, autoRotate) {
+        if (!autoRotate && manualFullscreen) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
+    }
+
+    // Immersive mode while fullscreen: hide status and navigation bars.
+    DisposableEffect(fullscreen) {
+        activity?.window?.let { window ->
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            if (fullscreen) {
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose { }
+    }
+
+    // Back leaves the player, but first restores a manually expanded video.
+    BackHandler(enabled = fullscreen && !autoRotate) {
+        manualFullscreen = false
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
     val track = remember(args.subsPath) {
@@ -124,6 +203,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     LaunchedEffect(player) {
         while (true) {
             positionMs = player.currentPosition
+            restorePositionMs = positionMs
             playing = player.isPlaying
             val duration = player.duration
             if (duration > 0) durationMs = duration
@@ -231,7 +311,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
+            if (!fullscreen) TopAppBar(
                 title = {
                     Column {
                         Text(
@@ -303,18 +383,23 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                 )
             )
         },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = if (fullscreen) Color.Black else MaterialTheme.colorScheme.background
     ) { padding ->
         Column(
             Modifier
-                .padding(padding)
-                .fillMaxSize()
+                .then(
+                    if (fullscreen) Modifier.fillMaxSize()
+                    else Modifier.padding(padding).fillMaxSize()
+                )
         ) {
             // ------------------------------------------------------- video
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(240.dp)
+                    .then(
+                        if (fullscreen) Modifier.weight(1f)
+                        else Modifier.height(240.dp)
+                    )
                     .background(Color.Black)
                     .onSizeChanged { videoSize = it }
                     .pointerInput(Unit) {
@@ -524,7 +609,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                     listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f))
                                 )
                             )
-                            .padding(top = 32.dp, bottom = 2.dp)
+                            .padding(top = 32.dp, bottom = if (fullscreen) 8.dp else 2.dp)
                     ) {
                         Row(
                             Modifier
@@ -560,6 +645,40 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 fontWeight = FontWeight.Medium,
                                 color = Color.White
                             )
+                            // Maximize/restore is only needed when auto-rotate is
+                            // off; with it on, landscape orientation drives fullscreen.
+                            if (!autoRotate) {
+                                IconButton(
+                                    onClick = {
+                                        val enter = !fullscreen
+                                        manualFullscreen = enter
+                                        activity?.requestedOrientation =
+                                            if (enter) {
+                                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                                            } else {
+                                                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                                            }
+                                    },
+                                    modifier = Modifier
+                                        .padding(start = 2.dp)
+                                        .size(40.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (fullscreen) {
+                                            Icons.Default.FullscreenExit
+                                        } else {
+                                            Icons.Default.Fullscreen
+                                        },
+                                        contentDescription = if (fullscreen) {
+                                            "Exit full screen"
+                                        } else {
+                                            "Full screen"
+                                        },
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -582,58 +701,60 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                 }
             }
 
-            // ------------------------------------------------- transcript
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Transcript",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    if (autoFollow) "Following ▾" else "Follow ▾",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (autoFollow) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .clickable { autoFollow = !autoFollow }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                )
-            }
-
-            if (track.isEmpty()) {
-                Text(
-                    "No speech was detected in this video.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
+            if (!fullscreen) {
+                // --------------------------------------------- transcript
+                Row(
+                    Modifier
                         .fillMaxWidth()
-                        .padding(top = 24.dp)
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp)
+                        .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    itemsIndexed(track.cues()) { index, cue ->
-                        TranscriptRow(
-                            index = index,
-                            cue = cue,
-                            active = index == currentIndex,
-                            onClick = {
-                                autoFollow = false
-                                player.seekTo((cue.start() * 1000).toLong())
-                            }
-                        )
+                    Text(
+                        "Transcript",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        if (autoFollow) "Following ▾" else "Follow ▾",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (autoFollow) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clickable { autoFollow = !autoFollow }
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+
+                if (track.isEmpty()) {
+                    Text(
+                        "No speech was detected in this video.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 24.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp)
+                    ) {
+                        itemsIndexed(track.cues()) { index, cue ->
+                            TranscriptRow(
+                                index = index,
+                                cue = cue,
+                                active = index == currentIndex,
+                                onClick = {
+                                    autoFollow = false
+                                    player.seekTo((cue.start() * 1000).toLong())
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -705,6 +826,43 @@ private fun Player.playPause() {
     } else {
         play()
     }
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun autoRotateEnabled(context: Context): Boolean = runCatching {
+    Settings.System.getInt(
+        context.contentResolver,
+        Settings.System.ACCELEROMETER_ROTATION,
+        1
+    ) == 1
+}.getOrDefault(true)
+
+/** Watches the system auto-rotate toggle so the player reacts immediately. */
+@Composable
+private fun rememberAutoRotateEnabled(): Boolean {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(autoRotateEnabled(context)) }
+    DisposableEffect(context) {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                enabled = autoRotateEnabled(context)
+            }
+        }
+        context.contentResolver.registerContentObserver(
+            Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION),
+            false,
+            observer
+        )
+        onDispose {
+            context.contentResolver.unregisterContentObserver(observer)
+        }
+    }
+    return enabled
 }
 
 private fun shareSubtitles(context: Context, kind: String, videoId: String, track: SubtitleTrack) {
