@@ -133,6 +133,21 @@ object CacheCleaner {
     }
 
     /**
+     * Deletes one cached video (media, subtitles and metadata) right away.
+     * Used by the swipe-to-delete gesture on the home screen's Cached list.
+     *
+     * @return whether the entry disappeared (it may already be gone).
+     */
+    @Synchronized
+    fun delete(cacheRoot: File, id: String): Boolean {
+        val dir = File(cacheRoot, id)
+        if (!dir.isDirectory) {
+            return false
+        }
+        return deleteEntry(dir)
+    }
+
+    /**
      * Gives a cache entry a fresh "just downloaded" timestamp: it moves to the
      * top of the cache (newest first) and its age limit starts over. Used when
      * a saved video is un-flagged in the home screen's Cached list.

@@ -32,6 +32,10 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
    are exempt from every limit and don't count toward them. Un-starring puts
    the video back on top of Cached with a fresh age, after which the limits
    apply to it again. The Cached list always mirrors what is on disk
+8. Swipe a cached row to the **right** to delete that video from disk right
+   away: a bin icon grows as you drag, and releasing past the threshold
+   removes the entry (its media, subtitles and metadata). Releasing earlier
+   slides the row back without deleting anything
 
 ## Building
 

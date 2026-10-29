@@ -1,7 +1,12 @@
 package dev.tubescribe.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Star
@@ -44,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -51,10 +59,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import dev.tubescribe.CacheCleaner
 import dev.tubescribe.Pipeline
@@ -65,6 +77,7 @@ import dev.tubescribe.media.Quality
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -116,6 +129,21 @@ fun HomeScreen(
         } else {
             TubeApp.saveVideo(id)
             saved = TubeApp.savedVideoIds
+        }
+    }
+
+    // Swipe-to-delete: remove the row right away, then drop the entry from
+    // disk in the background. A deleted saved video loses its star too, so
+    // the Saved section cannot point at files that are gone.
+    fun deleteCached(item: Pipeline.RecentVideo) {
+        val id = item.id()
+        if (saved.contains(id)) {
+            TubeApp.unsaveVideo(id)
+            saved = TubeApp.savedVideoIds
+        }
+        cached = cached.filterNot { it.id() == id }
+        scope.launch(Dispatchers.IO) {
+            runCatching { CacheCleaner.delete(TubeApp.cacheDir, id) }
         }
     }
 
@@ -304,7 +332,8 @@ fun HomeScreen(
                             item = item,
                             saved = true,
                             onToggleSave = { toggleSave(item) },
-                            onClick = { openVideo(item) }
+                            onClick = { openVideo(item) },
+                            onDelete = { deleteCached(item) }
                         )
                     }
                     item { Spacer(Modifier.height(10.dp)) }
@@ -334,7 +363,8 @@ fun HomeScreen(
                             item = item,
                             saved = saved.contains(item.id()),
                             onToggleSave = { toggleSave(item) },
-                            onClick = { openVideo(item) }
+                            onClick = { openVideo(item) },
+                            onDelete = { deleteCached(item) }
                         )
                     }
                 }
@@ -348,45 +378,110 @@ private fun CachedRow(
     item: Pipeline.RecentVideo,
     saved: Boolean,
     onToggleSave: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDelete: () -> Unit
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier
+    val scope = rememberCoroutineScope()
+    val offsetX = remember { Animatable(0f) }
+    var width by remember { mutableIntStateOf(0) }
+    // The row must travel this far to the right before releasing deletes it.
+    val threshold = width * 0.28f
+    val draggableState = rememberDraggableState { delta ->
+        scope.launch {
+            offsetX.snapTo((offsetX.value + delta).coerceIn(0f, width.toFloat()))
+        }
+    }
+
+    Box(
+        Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clipToBounds()
     ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Delete affordance behind the row: as the row slides right, a red
+        // strip is revealed and the bin icon fades and scales in with it.
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.matchParentSize()
         ) {
-            Icon(
-                Icons.Default.SmartDisplay,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    item.title(),
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    item.metaLine(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            Box(
+                Modifier.fillMaxSize(),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Delete from cache",
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier
+                        .padding(start = 20.dp)
+                        .size(26.dp)
+                        .graphicsLayer {
+                            val progress = if (width > 0) {
+                                (offsetX.value / threshold).coerceIn(0f, 1f)
+                            } else {
+                                0f
+                            }
+                            alpha = progress
+                            scaleX = 0.6f + 0.4f * progress
+                            scaleY = scaleX
+                        }
                 )
             }
-            IconButton(onClick = onToggleSave) {
-                Icon(
-                    if (saved) Icons.Default.Star else Icons.Default.StarBorder,
-                    contentDescription = if (saved) "Unsave video" else "Save video",
-                    tint = if (saved) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+        }
+
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .onSizeChanged { width = it.width }
+                .draggable(
+                    state = draggableState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = {
+                        if (width > 0 && offsetX.value >= threshold) {
+                            // Slid far enough: finish the swipe, then delete.
+                            offsetX.animateTo(width.toFloat(), tween(160))
+                            onDelete()
+                        } else {
+                            offsetX.animateTo(0f, tween(160))
+                        }
+                    }
                 )
+                .clickable(onClick = onClick)
+        ) {
+            Row(
+                Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.SmartDisplay,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        item.title(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        item.metaLine(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onToggleSave) {
+                    Icon(
+                        if (saved) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = if (saved) "Unsave video" else "Save video",
+                        tint = if (saved) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
