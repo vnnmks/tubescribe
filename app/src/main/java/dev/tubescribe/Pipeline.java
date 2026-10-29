@@ -12,6 +12,7 @@ import dev.tubescribe.subs.SubtitleTrack;
 import dev.tubescribe.transcribe.GroqTranscriber;
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.Fmt;
+import dev.tubescribe.util.OperationCancelledException;
 import dev.tubescribe.util.ProgressListener;
 
 import java.io.File;
@@ -69,10 +70,37 @@ public final class Pipeline {
         final File metaFile = new File(cacheDir, "meta.properties");
 
         if (valid(media) && subtitleFile.isFile()) {
+            final VideoInfo cached = readMeta(id, metaFile);
+            VideoInfo served = cached;
+            // Re-requesting a cached video at a higher quality upgrades the
+            // download in place; the old copy only leaves the cache once the
+            // new one is fully loaded.
+            String note = null;
+            boolean upgraded = false;
+            if (quality.maxHeight() > cached.height()) {
+                final UpgradeOutcome outcome = upgradeCachedMedia(
+                        input, quality, cacheDir, metaFile, media, audioSource, cached, listener, cancel);
+                if (outcome.info() != null) {
+                    served = outcome.info();
+                    upgraded = true;
+                } else {
+                    note = outcome.note();
+                }
+            }
             cancel.throwIfCancelled();
-            listener.update(1.0, "Loaded video and subtitles from cache");
-            return new Result(media, subtitleFile, SubtitleTrack.readSrt(subtitleFile.toPath()),
-                    readMeta(id, metaFile), true);
+            final SubtitleTrack track = SubtitleTrack.readSrt(subtitleFile.toPath());
+            final String subtitleSummary = track.isEmpty()
+                    ? "no speech detected" : (track.size() + " subtitle cues");
+            if (upgraded) {
+                listener.update(1.0, "Upgraded · " + qualityNote(served) + " · " + subtitleSummary);
+                return new Result(media, subtitleFile, track, served, false);
+            }
+            if (note != null) {
+                listener.update(1.0, note + " · " + subtitleSummary);
+            } else {
+                listener.update(1.0, "Loaded video and subtitles from cache");
+            }
+            return new Result(media, subtitleFile, track, served, true);
         }
 
         if (groqKeys.isEmpty()) {
@@ -121,20 +149,7 @@ public final class Pipeline {
         audioSource.delete();
 
         final SubtitleTrack track = SubtitleTrack.readSrt(subtitleFile.toPath());
-        final StringBuilder status = new StringBuilder();
-        if (info.height() > 0 && info.wantedHeight() > info.height()) {
-            // The requested ceiling does not exist in this video; state what does.
-            status.append(info.height()).append("p (no ").append(info.wantedHeight())
-                    .append("p in this video");
-            final String available = info.availableLabel();
-            if (!available.isEmpty()) {
-                status.append(" · available: ").append(available);
-            }
-            status.append(')');
-        } else if (!info.qualityLabel().isBlank()) {
-            status.append(info.qualityLabel());
-        }
-        final String qualityNote = status.toString();
+        final String qualityNote = qualityNote(info);
         final String subtitleSummary = track.isEmpty() ? "no speech detected"
                 : track.size() + " subtitle cues";
         listener.update(1.0, qualityNote.isEmpty()
@@ -190,6 +205,100 @@ public final class Pipeline {
             }
         }
         throw new MediaException("Could not download the media after refreshing the stream URL.");
+    }
+
+    /**
+     * Re-downloads an already cached video at a higher requested quality. The
+     * new file is downloaded and verified under a temporary name and only
+     * replaces the cached one (fully loaded) at the very end; on any failure —
+     * or when YouTube offers nothing better — the lower-quality copy stays
+     * in place and an explanatory note is returned.
+     */
+    private UpgradeOutcome upgradeCachedMedia(final String input, final Quality quality,
+                                              final File cacheDir, final File metaFile,
+                                              final File media, final File audioSource,
+                                              final VideoInfo cached,
+                                              final ProgressListener listener,
+                                              final Cancellation cancel) throws Exception {
+        final File upgraded = new File(cacheDir, "video-upgrade.mp4");
+        try {
+            cancel.throwIfCancelled();
+            listener.update(0.05, "Checking YouTube…");
+            YouTubeClient.initialize(null);
+            final VideoInfo resolved = new YouTubeClient().resolve(input, quality);
+            if (resolved.height() <= cached.height()) {
+                LOG.info("No quality above " + cached.height() + "p available for " + cached.id()
+                        + "; keeping the cached video");
+                return new UpgradeOutcome(null,
+                        "No higher quality available — keeping the cached video");
+            }
+            listener.update(0.06, "Upgrading cached video to " + resolved.qualityLabel() + "…");
+            final VideoInfo fetched = downloadMedia(
+                    input, quality, resolved, cacheDir, upgraded, audioSource, listener, cancel);
+            // Fully loaded and verified — now swap it in. The old file is
+            // moved aside first so a failed swap can be undone.
+            final File backup = new File(cacheDir, "video-old.mp4");
+            final boolean keptOldFile = media.renameTo(backup);
+            try {
+                try {
+                    Files.move(upgraded.toPath(), media.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+                    Files.move(upgraded.toPath(), media.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
+                saveMeta(metaFile, fetched);
+                return new UpgradeOutcome(fetched, null);
+            } catch (final Exception swapFailed) {
+                if (keptOldFile) {
+                    try {
+                        Files.move(backup.toPath(), media.toPath(),
+                                StandardCopyOption.REPLACE_EXISTING);
+                    } catch (final Exception restoreFailed) {
+                        LOG.warning("Could not restore the old cached video: " + restoreFailed);
+                    }
+                }
+                throw swapFailed;
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                backup.delete();
+            }
+        } catch (final OperationCancelledException e) {
+            throw e;
+        } catch (final Exception e) {
+            // The expired-URL retry inside downloadMedia may have written meta
+            // for the higher quality already; restore the cached entry's info.
+            try {
+                saveMeta(metaFile, cached);
+            } catch (final Exception metaRestore) {
+                LOG.warning("Could not restore cached meta: " + metaRestore);
+            }
+            LOG.warning("Upgrading the cached video failed, keeping it: " + e);
+            return new UpgradeOutcome(null, "Upgrade failed — keeping the cached video");
+        } finally {
+            // No transcription runs in the cache-hit path, so clean the
+            // intermediates here.
+            //noinspection ResultOfMethodCallIgnored
+            upgraded.delete();
+            //noinspection ResultOfMethodCallIgnored
+            audioSource.delete();
+        }
+    }
+
+    /** The one-line quality note shown in the pipeline's status message. */
+    private static String qualityNote(final VideoInfo info) {
+        if (info.height() > 0 && info.wantedHeight() > info.height()) {
+            // The requested ceiling does not exist in this video; state what does.
+            final StringBuilder status = new StringBuilder();
+            status.append(info.height()).append("p (no ").append(info.wantedHeight())
+                    .append("p in this video");
+            final String available = info.availableLabel();
+            if (!available.isEmpty()) {
+                status.append(" · available: ").append(available);
+            }
+            return status.append(')').toString();
+        }
+        return info.qualityLabel();
     }
 
     // ------------------------------------------------------------- utilities
@@ -322,10 +431,13 @@ public final class Pipeline {
         return result;
     }
 
+    /** Result of an in-place cache upgrade attempt. */
+    private record UpgradeOutcome(VideoInfo info, String note) {
+    }
+
     public record RecentVideo(String id, String title, String uploader, String qualityLabel,
                               long durationSeconds, String url, File mediaFile, File subtitleFile,
-                              long modified) {
-        public String metaLine() {
+                              long modified) {        public String metaLine() {
             return qualityLabel + " · " + Fmt.time(durationSeconds) + " · "
                     + (modified > 0 ? new java.text.SimpleDateFormat("MMM d",
                     java.util.Locale.getDefault()).format(new java.util.Date(modified)) : "");

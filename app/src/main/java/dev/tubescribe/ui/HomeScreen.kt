@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartDisplay
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +46,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,17 +56,21 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.tubescribe.CacheCleaner
 import dev.tubescribe.Pipeline
 import dev.tubescribe.PipelineState
 import dev.tubescribe.TubeApp
 import dev.tubescribe.TubeViewModel
 import dev.tubescribe.media.Quality
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     viewModel: TubeViewModel,
-    onOpenKeys: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenPlayer: (PlayerArgs) -> Unit
 ) {
     val state by viewModel.state.collectAsState()
@@ -71,15 +78,17 @@ fun HomeScreen(
     val clipboard = LocalClipboardManager.current
 
     var qualityName by rememberSaveable { mutableStateOf(TubeApp.lastQuality) }
-    var recent by remember { mutableStateOf<List<Pipeline.RecentVideo>>(emptyList()) }
+    var cached by remember { mutableStateOf<List<Pipeline.RecentVideo>>(emptyList()) }
+    var saved by rememberSaveable { mutableStateOf<Set<String>>(TubeApp.savedVideoIds) }
     var showQualityMenu by remember { mutableStateOf(false) }
     val quality = Quality.fromName(qualityName, Quality.P720)
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         if (url.isBlank()) {
             viewModel.setUrl(TubeApp.lastUrl)
         }
-        recent = viewModel.recent()
+        cached = viewModel.recent()
     }
 
     // A finished run opens the player.
@@ -87,7 +96,27 @@ fun HomeScreen(
         val done = state as? PipelineState.Done ?: return@LaunchedEffect
         onOpenPlayer(PlayerArgs.from(done.result))
         viewModel.dismissResult()
-        recent = viewModel.recent()
+        saved = TubeApp.savedVideoIds
+        cached = viewModel.recent()
+    }
+
+    // Star / un-star: saved videos are exempt from every cache limit;
+    // un-flagging gives the entry a fresh age and puts it on top of Cached.
+    fun toggleSave(item: Pipeline.RecentVideo) {
+        val id = item.id()
+        if (saved.contains(id)) {
+            TubeApp.unsaveVideo(id)
+            saved = TubeApp.savedVideoIds
+            scope.launch(Dispatchers.IO) {
+                runCatching { CacheCleaner.markFresh(TubeApp.cacheDir, id) }
+                runCatching { CacheCleaner.clean(TubeApp.cacheDir) }
+                val refreshed = viewModel.recent()
+                withContext(Dispatchers.Main) { cached = refreshed }
+            }
+        } else {
+            TubeApp.saveVideo(id)
+            saved = TubeApp.savedVideoIds
+        }
     }
 
     Scaffold(
@@ -111,8 +140,8 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onOpenKeys) {
-                        Icon(Icons.Default.Settings, contentDescription = "Groq API keys")
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -242,42 +271,71 @@ fun HomeScreen(
             }
 
             Spacer(Modifier.height(16.dp))
-            Text(
-                "Recent",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(6.dp))
 
-            if (recent.isEmpty()) {
-                Text(
-                    "Videos you transcribe will show up here — the video and its " +
-                        "subtitles are cached on this device.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(recent, key = { it.id() }) { item ->
-                        RecentRow(item = item, onClick = {
-                            val media = item.mediaFile()
-                            val subs = item.subtitleFile()
-                            if (media.isFile && media.length() >= 1024 && subs.isFile) {
-                                onOpenPlayer(PlayerArgs.from(item))
-                            } else {
-                                // The cache vanished (cleared storage, interrupted run…):
-                                // re-fetch and re-transcribe instead of opening a broken player.
-                                val height = item.qualityLabel()
-                                    .filter { c -> c.isDigit() }.toIntOrNull() ?: 720
-                                viewModel.start(
-                                    item.url(),
-                                    Quality.fromHeight(height, Quality.P720)
-                                )
-                            }
-                        })
+            val openVideo: (Pipeline.RecentVideo) -> Unit = { item ->
+                val media = item.mediaFile()
+                val subs = item.subtitleFile()
+                if (media.isFile && media.length() >= 1024 && subs.isFile) {
+                    onOpenPlayer(PlayerArgs.from(item))
+                } else {
+                    // The cache vanished (cleared storage, interrupted run…):
+                    // re-fetch and re-transcribe instead of opening a broken player.
+                    val height = item.qualityLabel()
+                        .filter { c -> c.isDigit() }.toIntOrNull() ?: 720
+                    viewModel.start(item.url(), Quality.fromHeight(height, Quality.P720))
+                }
+            }
+
+            val savedItems = cached.filter { saved.contains(it.id()) }
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (savedItems.isNotEmpty()) {
+                    item {
+                        Text(
+                            "Saved",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    items(savedItems, key = { "saved:" + it.id() }) { item ->
+                        CachedRow(
+                            item = item,
+                            saved = true,
+                            onToggleSave = { toggleSave(item) },
+                            onClick = { openVideo(item) }
+                        )
+                    }
+                    item { Spacer(Modifier.height(10.dp)) }
+                }
+
+                item {
+                    Text(
+                        "Cached",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (cached.isEmpty()) {
+                    item {
+                        Text(
+                            "Videos you transcribe will show up here — the video " +
+                                "and its subtitles are cached on this device. " +
+                                "Tap the star to keep one permanently, beyond " +
+                                "the cache limits.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    items(cached, key = { "cached:" + it.id() }) { item ->
+                        CachedRow(
+                            item = item,
+                            saved = saved.contains(item.id()),
+                            onToggleSave = { toggleSave(item) },
+                            onClick = { openVideo(item) }
+                        )
                     }
                 }
             }
@@ -286,7 +344,12 @@ fun HomeScreen(
 }
 
 @Composable
-private fun RecentRow(item: Pipeline.RecentVideo, onClick: () -> Unit) {
+private fun CachedRow(
+    item: Pipeline.RecentVideo,
+    saved: Boolean,
+    onToggleSave: () -> Unit,
+    onClick: () -> Unit
+) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
@@ -295,7 +358,7 @@ private fun RecentRow(item: Pipeline.RecentVideo, onClick: () -> Unit) {
             .clickable(onClick = onClick)
     ) {
         Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -315,6 +378,14 @@ private fun RecentRow(item: Pipeline.RecentVideo, onClick: () -> Unit) {
                     item.metaLine(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onToggleSave) {
+                Icon(
+                    if (saved) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (saved) "Unsave video" else "Save video",
+                    tint = if (saved) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

@@ -85,9 +85,23 @@ fun AppNav(viewModel: TubeViewModel) {
     }
 
     when (screen) {
+        "settings" -> {
+            BackHandler { screen = "home" }
+            SettingsScreen(
+                onBack = { screen = "home" },
+                onOpenKeys = { screen = "keys" },
+                onOpenCache = { screen = "cache" }
+            )
+        }
+
         "keys" -> {
             BackHandler { screen = "home" }
             KeysScreen(onBack = { screen = "home" })
+        }
+
+        "cache" -> {
+            BackHandler { screen = "home" }
+            CacheScreen(onBack = { screen = "home" })
         }
 
         "player" -> {
@@ -103,7 +117,7 @@ fun AppNav(viewModel: TubeViewModel) {
         else -> {
             HomeScreen(
                 viewModel = viewModel,
-                onOpenKeys = { screen = "keys" },
+                onOpenSettings = { screen = "settings" },
                 onOpenPlayer = { args ->
                     playerArgs = args
                     screen = "player"

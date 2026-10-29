@@ -93,6 +93,48 @@ object TubeApp {
             prefs.edit().putFloat("subs_cy", value).apply()
         }
 
+    /** Settings → Caching videos: how long cached videos may live, in ms (0 = no limit). */
+    var cacheRetentionMs: Long
+        get() = prefs.getLong("cache_retention_ms", 7L * 24 * 60 * 60 * 1000)
+        set(value) {
+            prefs.edit().putLong("cache_retention_ms", value).apply()
+        }
+
+    /** Settings → Caching videos: how many videos to keep cached (-1 = no limit). */
+    var cacheMaxVideos: Int
+        get() = prefs.getInt("cache_max_videos", 3)
+        set(value) {
+            prefs.edit().putInt("cache_max_videos", value).apply()
+        }
+
+    /**
+     * How the two caching limits combine: "or" deletes an entry once either
+     * limit is exceeded, "and" once both are exceeded. When only one limit is
+     * configured, it applies alone regardless of the operator.
+     */
+    var cacheOperator: String
+        get() = prefs.getString("cache_operator", "or") ?: "or"
+        set(value) {
+            prefs.edit().putString("cache_operator", value).apply()
+        }
+
+    /** Video IDs the user starred; exempt from every cache limit until un-starred. */
+    var savedVideoIds: Set<String>
+        get() = prefs.getStringSet("saved_ids", emptySet()) ?: emptySet()
+        set(value) {
+            prefs.edit().putStringSet("saved_ids", value).apply()
+        }
+
+    fun isSaved(id: String): Boolean = savedVideoIds.contains(id)
+
+    fun saveVideo(id: String) {
+        savedVideoIds = savedVideoIds + id
+    }
+
+    fun unsaveVideo(id: String) {
+        savedVideoIds = savedVideoIds - id
+    }
+
     /**
      * Debug-only override for the audio chunk byte limit (0 = production
      * limit). A small forced limit makes [dev.tubescribe.media.AudioChunker]

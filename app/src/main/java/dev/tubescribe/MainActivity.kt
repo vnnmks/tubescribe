@@ -17,6 +17,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         TubeApp.init(this)
+        // Settings → Caching videos: prune the cache once at process start.
+        Thread { runCatching { CacheCleaner.clean(TubeApp.cacheDir) } }.start()
         handleIntent(intent)
         setContent {
             TubeTheme {

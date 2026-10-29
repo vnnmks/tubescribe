@@ -83,6 +83,16 @@ class TubeViewModel : ViewModel() {
                     )
                 }
                 _state.value = PipelineState.Done(result)
+                if (!result.fromCache()) {
+                    // A fresh download grew the cache; apply the count/age
+                    // limits now. The new entry is the newest one, so it is
+                    // never the one trimmed. Re-runs served from the cache are
+                    // skipped — nothing grew and a replayed old video must not
+                    // be deleted while its player is still using the files.
+                    launch(Dispatchers.IO) {
+                        runCatching { CacheCleaner.clean(TubeApp.cacheDir) }
+                    }
+                }
             } catch (e: OperationCancelledException) {
                 _state.value = PipelineState.Idle
             } catch (e: Exception) {
