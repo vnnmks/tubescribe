@@ -108,6 +108,7 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -259,18 +260,17 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         val insetPx = with(androidx.compose.ui.platform.LocalDensity.current) {
             12.dp.toPx()
         }
-        val target =
+        val targetY =
             if (subsPlaced && restoredOnce) {
-                placedPos
+                placedPos.y
             } else {
-                Offset(
-                    (videoSize.width - subsSize.width) / 2f,
-                    (videoSize.height - subsSize.height) - insetPx
-                )
+                (videoSize.height - subsSize.height) - insetPx
             }
+        // Horizontal placement is not user-controlled: the pill is always
+        // centered, no matter where it was dragged vertically.
         val clamped = Offset(
-            target.x.coerceIn(0f, (videoSize.width - subsSize.width).coerceAtLeast(0).toFloat()),
-            target.y.coerceIn(0f, (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat())
+            (videoSize.width - subsSize.width) / 2f,
+            targetY.coerceIn(0f, (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat())
         )
         if (clamped != renderPos) {
             renderPos = clamped
@@ -285,18 +285,20 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         if (!overlayMeasured || restoredOnce || !subsPlaced) return@LaunchedEffect
         restoredOnce = true
         placedPos = Offset(
-            TubeApp.subtitleCenterX * videoSize.width - subsSize.width / 2f,
+            (videoSize.width - subsSize.width) / 2f,
             TubeApp.subtitleCenterY * videoSize.height - subsSize.height / 2f
         )
+        // Discard any horizontal position saved by older versions.
+        TubeApp.subtitleCenterX = 0.5f
     }
 
     // Persist the overlay's center as a fraction of the video area so the
-    // placement also fits videos of other sizes.
+    // placement also fits videos of other sizes. Only the vertical fraction
+    // is meaningful; the horizontal center is always 0.5.
     val persistSubtitlePos = {
         if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
             TubeApp.subtitlePlaced = true
-            TubeApp.subtitleCenterX =
-                (renderPos.x + subsSize.width / 2f) / videoSize.width
+            TubeApp.subtitleCenterX = 0.5f
             TubeApp.subtitleCenterY =
                 (renderPos.y + subsSize.height / 2f) / videoSize.height
         }
@@ -441,13 +443,18 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                         break
                                     }
                                     val pos = pressed.position
-                                    if ((pos - start).getDistance() >
-                                        viewConfiguration.touchSlop
-                                    ) {
+                                    val dy = pos.y - start.y
+                                    val dx = pos.x - start.x
+                                    // Vertical-only drag: start once the finger has
+                                    // moved far enough vertically. A horizontal
+                                    // gesture is not ours and falls through to the
+                                    // controls untouched.
+                                    if (abs(dy) > viewConfiguration.touchSlop) {
                                         drag = true
                                         lastPos = pos
                                         break
                                     }
+                                    if (abs(dx) > viewConfiguration.touchSlop) break
                                 }
                             }
                             when {
@@ -463,13 +470,10 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                         val pressed = event.changes.firstOrNull { it.pressed }
                                         if (pressed == null) break
                                         val pos = pressed.position
-                                        val maxX = (videoSize.width - subsSize.width)
-                                            .coerceAtLeast(0).toFloat()
                                         val maxY = (videoSize.height - subsSize.height)
                                             .coerceAtLeast(0).toFloat()
                                         placedPos = Offset(
-                                            (placedPos.x + (pos.x - lastPos.x))
-                                                .coerceIn(0f, maxX),
+                                            (videoSize.width - subsSize.width) / 2f,
                                             (placedPos.y + (pos.y - lastPos.y))
                                                 .coerceIn(0f, maxY)
                                         )
