@@ -25,6 +25,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.logging.Logger;
 
 /**
@@ -103,46 +108,88 @@ public final class Pipeline {
             return new Result(media, subtitleFile, track, served, true);
         }
 
-        if (groqKeys.isEmpty()) {
+        final boolean needMedia = !valid(media);
+        final boolean needSubs = !subtitleFile.isFile();
+        if (needMedia) {
+            //noinspection ResultOfMethodCallIgnored
+            media.delete();
+        }
+        // Fail before a single byte of video is fetched when transcription
+        // cannot run. An unreadable key still surfaces during the upload.
+        if (needSubs && groqKeys.isEmpty()) {
             throw new IOException("Transcription needs at least one Groq API key.\n\n"
                     + "Add one under Settings → Groq API keys. Keys are stored encrypted "
                     + "on this device.");
         }
 
-        if (!valid(media)) {
-            //noinspection ResultOfMethodCallIgnored
-            media.delete();
+        // One resolve feeds both halves of the work. It is a single small page
+        // fetch, so it stays on this thread before anything forks.
+        VideoInfo resolvedOrNull = null;
+        if (needMedia) {
             listener.update(0.02, "Checking YouTube…");
             YouTubeClient.initialize(null);
-            final VideoInfo resolved = new YouTubeClient().resolve(input, quality);
-            final VideoInfo info = downloadMedia(input, quality, resolved, cacheDir, media,
-                    audioSource, listener, cancel);
-            saveMeta(metaFile, info);
+            resolvedOrNull = new YouTubeClient().resolve(input, quality);
+        }
+        final VideoInfo resolved = resolvedOrNull;
+
+        // DASH videos arrive as two files, so the media half (video → mux) and
+        // the audio half (audio → chunks → Whisper) run side by side: the wait
+        // becomes max(video+merge, audio+chunk+transcribe) instead of the sum.
+        // A progressive stream is a single file that doubles as the
+        // transcription input, so that path stays serial, as before.
+        final boolean dash = needMedia && resolved.requiresMerge();
+        final boolean runMedia = needMedia;
+        final boolean runAudio = dash || needSubs;
+
+        // Released once the file branch 2 reads is on disk — or as soon as
+        // either branch dies. Branch 1 waits on it before muxing, branch 2
+        // before chunking; every release path is covered, so it cannot hang.
+        final CountDownLatch audioReady = new CountDownLatch(1);
+        if (!runMedia) {
+            audioReady.countDown();     // video.mp4 is already on disk
         }
 
-        final VideoInfo info = readMeta(id, metaFile);
-        if (!subtitleFile.isFile()) {
-            // No decoding: the compressed audio is split into upload-sized
-            // m4a chunks by sample passthrough (a couple of seconds of file
-            // copying) and sent to Groq as-is.
-            listener.update(0.71, "Preparing audio for the cloud…");
-            final File audioIn = valid(audioSource) ? audioSource : media;
-            final List<AudioChunker.Chunk> chunks =
-                    AudioChunker.split(audioIn, cacheDir, map(listener, 0.71, 0.05), cancel);
-            try {
-                cancel.throwIfCancelled();
-                listener.update(0.76, "Transcribing with Groq Whisper…");
-                final ProgressListener cloudProgress = map(listener, 0.76, 0.23);
-                final SubtitleTrack track = new SubtitleTrack(
-                        new GroqTranscriber(groqKeys).transcribe(chunks, cloudProgress, cancel));
-                writeSubtitleFile(subtitleFile, track);
-            } finally {
-                for (final AudioChunker.Chunk chunk : chunks) {
-                    //noinspection ResultOfMethodCallIgnored
-                    chunk.file().delete();
-                }
+        final ProgressAggregator progress = new ProgressAggregator(listener, runMedia, runAudio);
+        final Cancellation mediaCancel = new Cancellation();
+        final Cancellation audioCancel = new Cancellation();
+        final Runnable stopBoth = cancel.addHook(() -> {
+            mediaCancel.cancel();
+            audioCancel.cancel();
+        });
+        // Whichever branch is released also opens the latch the other may be
+        // waiting on, so no branch can stay blocked behind a dead sibling.
+        mediaCancel.addHook(audioReady::countDown);
+        audioCancel.addHook(audioReady::countDown);
+
+        final Run work = new Run(input, quality, resolved, cacheDir, media, audioSource,
+                subtitleFile, metaFile, dash, needSubs, audioReady, progress,
+                mediaCancel, audioCancel);
+
+        VideoInfo downloaded = null;
+        ExecutorService pool = null;
+        try {
+            if (runMedia && runAudio) {
+                pool = Executors.newFixedThreadPool(2);
+                final Future<VideoInfo> mediaFuture =
+                        pool.submit(() -> produceMedia(work));
+                final Future<Void> audioFuture = pool.submit(() -> {
+                    produceAudio(work);
+                    return null;
+                });
+                downloaded = join(mediaFuture, audioFuture, mediaCancel, audioCancel);
+            } else if (runMedia) {
+                downloaded = produceMedia(work);
+            } else {
+                produceAudio(work);
+            }
+        } finally {
+            stopBoth.run();
+            if (pool != null) {
+                pool.shutdownNow();
             }
         }
+
+        final VideoInfo info = runMedia ? downloaded : readMeta(id, metaFile);
 
         // The transcription is stored; the bulky intermediates are no longer needed.
         //noinspection ResultOfMethodCallIgnored
@@ -158,53 +205,227 @@ public final class Pipeline {
         return new Result(media, subtitleFile, track, info, false);
     }
 
-    private VideoInfo downloadMedia(final String input, final Quality quality,
-                                    final VideoInfo initial, final File cacheDir,
-                                    final File media, final File audioSource,
+    /** One run's shared state for the two parallel halves. */
+    private final class Run {
+        final String input;
+        final Quality quality;
+        final VideoInfo resolved;
+        final File cacheDir;
+        final File media;
+        final File audioSource;
+        final File subtitleFile;
+        final File metaFile;
+        final boolean dash;
+        final boolean needSubs;
+        final CountDownLatch audioReady;
+        final ProgressListener mediaProgress;
+        final ProgressListener audioProgress;
+        final Cancellation mediaCancel;
+        final Cancellation audioCancel;
+
+        Run(final String input, final Quality quality, final VideoInfo resolved,
+            final File cacheDir, final File media, final File audioSource,
+            final File subtitleFile, final File metaFile, final boolean dash,
+            final boolean needSubs,
+            final CountDownLatch audioReady, final ProgressAggregator progress,
+            final Cancellation mediaCancel, final Cancellation audioCancel) {
+            this.input = input;
+            this.quality = quality;
+            this.resolved = resolved;
+            this.cacheDir = cacheDir;
+            this.media = media;
+            this.audioSource = audioSource;
+            this.subtitleFile = subtitleFile;
+            this.metaFile = metaFile;
+            this.dash = dash;
+            this.needSubs = needSubs;
+            this.audioReady = audioReady;
+            this.mediaProgress = progress.branch(true);
+            this.audioProgress = progress.branch(false);
+            this.mediaCancel = mediaCancel;
+            this.audioCancel = audioCancel;
+        }
+    }
+
+    /**
+     * Half 1 — the video side: fetch it, then mux it into {@code video.mp4}.
+     * For DASH it waits only for the audio <em>file</em> (a small download that
+     * branch 2 makes first), never for the transcription; both usually finish
+     * while Whisper is still running.
+     */
+    private VideoInfo produceMedia(final Run work) throws Exception {
+        try {
+            final File videoSource = new File(work.cacheDir, "video-source.mp4");
+            final VideoInfo info;
+            if (work.dash) {
+                info = downloadVideo(work.input, work.quality, work.resolved, videoSource, false,
+                        map(work.mediaProgress, 0.0, 0.80), work.mediaCancel);
+                work.mediaCancel.throwIfCancelled();
+                awaitLatch(work.audioReady);
+                work.mediaCancel.throwIfCancelled();
+                work.mediaProgress.update(0.85, "Merging streams…");
+                StreamMerger.merge(videoSource, work.audioSource, work.media, work.mediaCancel);
+                //noinspection ResultOfMethodCallIgnored
+                videoSource.delete();
+                if (!valid(work.media)) {
+                    throw new MediaException("The downloaded video is empty.");
+                }
+            } else {
+                info = downloadVideo(work.input, work.quality, work.resolved, work.media, true,
+                        work.mediaProgress, work.mediaCancel);
+                if (!valid(work.media)) {
+                    throw new MediaException("The downloaded video is empty.");
+                }
+                // A progressive stream is its own transcription input.
+                work.audioReady.countDown();
+            }
+            // Persist the title/quality the moment the media is on disk: a
+            // transcription failure in the other half must not cost them, and
+            // a later retry that only needs subtitles reads them back here.
+            saveMeta(work.metaFile, info);
+            work.mediaProgress.update(1.0, "Video ready");
+            return info;
+        } catch (final Exception e) {
+            // The media half died: stop the transcription half rather than
+            // paying for a transcript that cannot be served.
+            work.audioCancel.cancel();
+            throw e;
+        }
+    }
+
+    /** Half 2 — the audio side: fetch it (DASH only), chunk it, transcribe it. */
+    private void produceAudio(final Run work) throws Exception {
+        try {
+            final boolean fetched;
+            if (work.dash) {
+                downloadAudio(work.input, work.quality, work.resolved, work.audioSource,
+                        map(work.audioProgress, 0.0, 0.20), work.audioCancel);
+                work.audioReady.countDown();
+                fetched = true;
+            } else {
+                // Progressive (or the media is already cached): the input is
+                // video.mp4, so wait for half 1 to produce it.
+                awaitLatch(work.audioReady);
+                work.audioCancel.throwIfCancelled();
+                fetched = false;
+            }
+            if (work.needSubs) {
+                transcribe(work, fetched);
+            }
+            work.audioProgress.update(1.0, work.needSubs ? "Subtitles ready" : "Audio ready");
+        } catch (final Exception e) {
+            // The transcription half died (bad key, no speech, cancelled):
+            // stop the download instead of fetching media nobody can open.
+            work.mediaCancel.cancel();
+            throw e;
+        }
+    }
+
+    /**
+     * No decoding: the compressed audio is split into upload-sized m4a chunks
+     * by sample passthrough (a couple of seconds of file copying) and sent to
+     * Groq as-is. Runs on branch 2, overlapping the video download.
+     */
+    private void transcribe(final Run work, final boolean fetchedAudio) throws IOException {
+        final double chunkAt = fetchedAudio ? 0.22 : 0.0;
+        final double chunkSpan = fetchedAudio ? 0.10 : 0.12;
+        final double whisperAt = fetchedAudio ? 0.34 : 0.14;
+        final double whisperSpan = 0.98 - whisperAt;
+
+        final File audioIn = valid(work.audioSource) ? work.audioSource : work.media;
+        work.audioProgress.update(chunkAt, "Preparing audio for the cloud…");
+        final List<AudioChunker.Chunk> chunks = AudioChunker.split(
+                audioIn, work.cacheDir, map(work.audioProgress, chunkAt, chunkSpan), work.audioCancel);
+        try {
+            work.audioCancel.throwIfCancelled();
+            work.audioProgress.update(whisperAt, "Transcribing with Groq Whisper…");
+            final SubtitleTrack track = new SubtitleTrack(
+                    new GroqTranscriber(groqKeys).transcribe(chunks,
+                            map(work.audioProgress, whisperAt, whisperSpan), work.audioCancel));
+            writeSubtitleFile(work.subtitleFile, track);
+        } finally {
+            for (final AudioChunker.Chunk chunk : chunks) {
+                //noinspection ResultOfMethodCallIgnored
+                chunk.file().delete();
+            }
+        }
+    }
+
+    /**
+     * Downloads one side of the media with a single re-resolve retry when
+     * YouTube reports an expired stream URL (HTTP 403/410). The listener sees
+     * 0..1 for this file alone; callers place it into their own range with
+     * {@link #map}.
+     */
+    private VideoInfo downloadVideo(final String input, final Quality quality,
+                                    final VideoInfo initial, final File target,
+                                    final boolean muxed,
                                     final ProgressListener listener,
                                     final Cancellation cancel) throws Exception {
         VideoInfo info = initial;
         for (int attempt = 0; attempt < 2; attempt++) {
             try {
-                if (info.requiresMerge()) {
-                    final File videoSource = new File(cacheDir, "video-source.mp4");
-                    listener.update(0.10, "Downloading video stream…");
-                    mediaDownloader.download(info.videoUrl(), videoSource.toPath(),
-                            "Video · " + info.qualityLabel(), map(listener, 0.10, 0.36), cancel);
-                    cancel.throwIfCancelled();
-                    listener.update(0.47, "Downloading audio stream…");
-                    mediaDownloader.download(info.audioUrl(), audioSource.toPath(), "Audio",
-                            map(listener, 0.47, 0.14), cancel);
-                    cancel.throwIfCancelled();
-                    listener.update(0.62, "Merging streams…");
-                    StreamMerger.merge(videoSource, audioSource, media, cancel);
-                    //noinspection ResultOfMethodCallIgnored
-                    videoSource.delete();
-                } else {
-                    listener.update(0.10, "Downloading video…");
-                    mediaDownloader.download(info.muxedUrl(), media.toPath(),
-                            "Video · " + info.qualityLabel(), map(listener, 0.10, 0.60), cancel);
-                }
-                if (!valid(media)) {
-                    throw new MediaException("The downloaded video is empty.");
-                }
+                listener.update(0.0, muxed ? "Downloading video…" : "Downloading video stream…");
+                mediaDownloader.download(muxed ? info.muxedUrl() : info.videoUrl(),
+                        target.toPath(), "Video · " + info.qualityLabel(), listener, cancel);
+                cancel.throwIfCancelled();
                 return info;
             } catch (final MediaException e) {
-                final String message = e.getMessage() == null ? "" : e.getMessage();
-                final boolean expired = message.contains("HTTP 403")
-                        || message.contains("HTTP 410")
-                        || message.toLowerCase(java.util.Locale.ROOT).contains("expired");
-                if (attempt == 0 && expired) {
-                    listener.update(0.09, "Media URL expired; refreshing YouTube link…");
+                if (attempt == 0 && expired(e)) {
+                    listener.update(0.0, "Media URL expired; refreshing YouTube link…");
                     LOG.info("Refreshing expired media URL for " + info.id());
                     info = new YouTubeClient().resolve(input, quality);
-                    saveMeta(new File(cacheDir, "meta.properties"), info);
                     continue;
                 }
                 throw e;
             }
         }
         throw new MediaException("Could not download the media after refreshing the stream URL.");
+    }
+
+    /** The audio half's download, with the same expired-URL retry as the video. */
+    private VideoInfo downloadAudio(final String input, final Quality quality,
+                                    final VideoInfo initial, final File target,
+                                    final ProgressListener listener,
+                                    final Cancellation cancel) throws Exception {
+        VideoInfo info = initial;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                listener.update(0.0, "Downloading audio stream…");
+                mediaDownloader.download(info.audioUrl(), target.toPath(), "Audio",
+                        listener, cancel);
+                cancel.throwIfCancelled();
+                return info;
+            } catch (final MediaException e) {
+                if (attempt == 0 && expired(e)) {
+                    listener.update(0.0, "Media URL expired; refreshing YouTube link…");
+                    LOG.info("Refreshing expired audio URL for " + info.id());
+                    info = new YouTubeClient().resolve(input, quality);
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw new MediaException("Could not download the audio after refreshing the stream URL.");
+    }
+
+    /** Googlevideo URLs expire; 403/410 (or an explicit "expired") says refresh. */
+    private static boolean expired(final MediaException e) {
+        final String message = e.getMessage() == null ? "" : e.getMessage();
+        return message.contains("HTTP 403")
+                || message.contains("HTTP 410")
+                || message.toLowerCase(java.util.Locale.ROOT).contains("expired");
+    }
+
+    /** Blocks until the latch opens, turning an interrupted wait into a cancel. */
+    private static void awaitLatch(final CountDownLatch latch)
+            throws OperationCancelledException {
+        try {
+            latch.await();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OperationCancelledException();
+        }
     }
 
     /**
@@ -233,8 +454,26 @@ public final class Pipeline {
                         "No higher quality available — keeping the cached video");
             }
             listener.update(0.06, "Upgrading cached video to " + resolved.qualityLabel() + "…");
-            final VideoInfo fetched = downloadMedia(
-                    input, quality, resolved, cacheDir, upgraded, audioSource, listener, cancel);
+            final VideoInfo fetched;
+            if (resolved.requiresMerge()) {
+                final File videoSource = new File(cacheDir, "video-source.mp4");
+                fetched = downloadVideo(input, quality, resolved, videoSource, false,
+                        map(listener, 0.06, 0.60), cancel);
+                cancel.throwIfCancelled();
+                downloadAudio(input, quality, fetched, audioSource,
+                        map(listener, 0.66, 0.24), cancel);
+                cancel.throwIfCancelled();
+                listener.update(0.90, "Merging streams…");
+                StreamMerger.merge(videoSource, audioSource, upgraded, cancel);
+                //noinspection ResultOfMethodCallIgnored
+                videoSource.delete();
+            } else {
+                fetched = downloadVideo(input, quality, resolved, upgraded, true,
+                        map(listener, 0.06, 0.84), cancel);
+            }
+            if (!valid(upgraded)) {
+                throw new MediaException("The downloaded video is empty.");
+            }
             // Fully loaded and verified — now swap it in. The old file is
             // moved aside first so a failed swap can be undone.
             final File backup = new File(cacheDir, "video-old.mp4");
@@ -327,6 +566,153 @@ public final class Pipeline {
                     : Math.min(0.999, offset + scale * Math.max(0, Math.min(1, fraction)));
             parent.update(value, message);
         };
+    }
+
+    /** Waits for both halves and throws the failure that actually failed the run. */
+    private static VideoInfo join(final Future<VideoInfo> mediaFuture,
+                                  final Future<Void> audioFuture,
+                                  final Cancellation mediaCancel,
+                                  final Cancellation audioCancel) throws Exception {
+        VideoInfo mediaInfo = null;
+        Exception mediaError = null;
+        try {
+            mediaInfo = mediaFuture.get();
+        } catch (final ExecutionException e) {
+            mediaError = unwrap(e);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            mediaCancel.cancel();
+            audioCancel.cancel();
+            throw new OperationCancelledException();
+        }
+        try {
+            audioFuture.get();
+        } catch (final ExecutionException e) {
+            // Either half may have been cancelled *because* the other one
+            // failed, so report whichever exception is the real one.
+            throw firstFailure(mediaError, unwrap(e));
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            mediaCancel.cancel();
+            audioCancel.cancel();
+            throw new OperationCancelledException();
+        }
+        if (mediaError != null) {
+            throw mediaError;
+        }
+        return mediaInfo;
+    }
+
+    private static Exception unwrap(final ExecutionException e) {
+        final Throwable cause = e.getCause();
+        return cause instanceof Exception ? (Exception) cause : new IllegalStateException(cause);
+    }
+
+    /**
+     * The exception the user sees when a half fails: a branch that was
+     * cancelled <em>because</em> its sibling died reports
+     * {@link OperationCancelledException}, so the genuine failure always wins —
+     * otherwise a broken Groq key would look like a user cancel (and a dead
+     * media URL like a successful run that simply stopped).
+     */
+    private static Exception firstFailure(final Exception mediaError, final Exception audioError) {
+        if (mediaError == null) {
+            return audioError;
+        }
+        if (audioError == null) {
+            return mediaError;
+        }
+        final boolean mediaCancelled = mediaError instanceof OperationCancelledException;
+        final boolean audioCancelled = audioError instanceof OperationCancelledException;
+        if (mediaCancelled != audioCancelled) {
+            return mediaCancelled ? audioError : mediaError;
+        }
+        if (!mediaCancelled) {
+            LOG.warning("Both pipeline halves failed (" + mediaError + "; " + audioError
+                    + "); reporting the media half.");
+        }
+        return mediaError;
+    }
+
+    /**
+     * Merges the two concurrent halves' progress into one monotonic 0..1 value.
+     *
+     * <p>Each half reports its own 0..1 completion; the weighted sum is scaled
+     * so the bar reaches 100% only when every running half is done and never
+     * moves backwards. The status text carries one line per running half —
+     * video first, subtitles second — so both halves' latest events stay
+     * visible at once.</p>
+     */
+    private static final class ProgressAggregator {
+        /** Whisper is the long pole, so its half owns more of the bar. */
+        private static final double MEDIA_WEIGHT = 1.0;
+        private static final double AUDIO_WEIGHT = 1.6;
+        private static final double FLOOR = 0.02;
+        private static final double SPAN = 0.96;
+
+        private final ProgressListener out;
+        private final boolean mediaActive;
+        private final boolean audioActive;
+        private double media;
+        private double audio;
+        private String mediaMessage = "Loading video…";
+        private String audioMessage = "Preparing subtitles…";
+
+        ProgressAggregator(final ProgressListener out, final boolean mediaActive,
+                           final boolean audioActive) {
+            this.out = out;
+            this.mediaActive = mediaActive;
+            this.audioActive = audioActive;
+        }
+
+        /** The listener one half reports to. */
+        ProgressListener branch(final boolean mediaBranch) {
+            return (fraction, message) -> update(mediaBranch, fraction, message);
+        }
+
+        private synchronized void update(final boolean mediaBranch, final double fraction,
+                                         final String message) {
+            // A source reporting "total unknown" (negative) only nudges its own
+            // half forward; nothing ever moves backwards.
+            final double local = fraction < 0
+                    ? (mediaBranch ? media : audio) + 0.01
+                    : Math.max(0.0, Math.min(1.0, fraction));
+            if (mediaBranch) {
+                media = Math.max(media, local);
+                if (message != null && !message.isBlank()) {
+                    mediaMessage = message;
+                }
+            } else {
+                audio = Math.max(audio, local);
+                if (message != null && !message.isBlank()) {
+                    audioMessage = message;
+                }
+            }
+            emit();
+        }
+
+        private void emit() {
+            double weight = 0.0;
+            double done = 0.0;
+            if (mediaActive) {
+                weight += MEDIA_WEIGHT;
+                done += MEDIA_WEIGHT * media;
+            }
+            if (audioActive) {
+                weight += AUDIO_WEIGHT;
+                done += AUDIO_WEIGHT * audio;
+            }
+            final double fraction = weight <= 0 ? 0.999 : FLOOR + SPAN * (done / weight);
+            out.update(Math.min(0.999, fraction), message());
+        }
+
+        private String message() {
+            // One line per running half; the bar still merges them into one.
+            if (mediaActive && audioActive) {
+                return mediaMessage + "\n" + audioMessage;
+            }
+            return mediaActive ? mediaMessage : audioMessage;
+        }
     }
 
     private static void saveMeta(final File metaFile, final VideoInfo info) throws IOException {

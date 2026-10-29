@@ -243,7 +243,11 @@ public final class GroqTranscriber {
                         .build();
                 listener.update((chunk + 0.45) / total,
                         "Groq chunk " + (chunk + 1) + "/" + total + " · transcribing via " + masked);
-                try (Response response = client.newCall(request).execute()) {
+                final okhttp3.Call call = client.newCall(request);
+                // Cancelling the run aborts this upload instead of waiting for
+                // Groq to answer — checked between chunks otherwise.
+                final Runnable removeHook = cancel.addHook(call::cancel);
+                try (Response response = call.execute()) {
                     cancel.throwIfCancelled();
                     final String body = response.body() == null ? "" : response.body().string();
                     if (response.isSuccessful()) {
@@ -268,8 +272,15 @@ public final class GroqTranscriber {
                         throw new IOException("Groq API error (HTTP " + response.code()
                                 + "): " + message);
                     }
+                } finally {
+                    removeHook.run();
                 }
             } catch (final IOException e) {
+                if (cancel.isCancelled()) {
+                    // A cancelled call surfaces as an IOException: report the
+                    // cancel instead of rotating keys after a backoff sleep.
+                    cancel.throwIfCancelled();
+                }
                 if (dead.contains(index) || isStickyFailure(e)) {
                     // stable non-key failures rotate like rate limits do
                     lastError = e;
