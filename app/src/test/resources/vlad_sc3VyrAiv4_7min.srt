@@ -39,242 +39,254 @@ what they've written into AI to check the grammar or to get any new ideas about
 what might be missing.
 
 11
-00:00:58,640 --> 00:01:03,960
+00:00:58,640 --> 00:01:04,000
 So we're really talking about somebody who is in a very clever way using AI, such that
 
 12
-00:01:03,980 --> 00:01:10,160
+00:01:04,020 --> 00:01:10,260
 nobody's going to tell, such that it's going to pass all of the AI recognition tests,
 
 13
-00:01:10,180 --> 00:01:16,680
-but the writing is essentially intertwined with AI in the sense that an AI produces a
+00:01:10,280 --> 00:01:16,408
+but the writing is essentially intertwined with the AI in the sense that an AI produces
 
 14
-00:01:16,700 --> 00:01:21,900
-sentence and then the author alters it to their taste and then shoves it into their piece.
+00:01:16,428 --> 00:01:21,528
+a sentence and then the author alters it to their taste and then shoves it into their
 
 15
-00:01:22,720 --> 00:01:26,660
-What do we think about that? And what are the ethics of that?
+00:01:21,548 --> 00:01:26,628
+piece. What do we think about that and what are the ethics of that?
 
 16
-00:01:29,720 --> 00:01:36,420
-I think the main thing you lose is access to the unconscious
+00:01:26,648 --> 00:01:31,408
+I think the main thing you lose
 
 17
-00:01:36,440 --> 00:01:43,340
-mind. What you completely lose there is the situation of
+00:01:31,428 --> 00:01:38,368
+is access to the unconscious mind. What you
 
 18
-00:01:43,360 --> 00:01:50,280
-a combination of words emanating out of the unconscious mind of the author onto the
+00:01:38,388 --> 00:01:45,088
+completely lose there is the situation of a combination of
 
 19
-00:01:50,300 --> 00:01:56,700
-page in a way that the author absolutely intends but does not exist.
+00:01:45,108 --> 00:01:52,048
+words emanating out of the unconscious mind of the author onto the page in a
 
 20
-00:02:00,445 --> 00:02:06,265
-Because when you interact with AI as you write you're putting yourself into the space
+00:01:52,068 --> 00:01:57,928
+way that the author absolutely intends but does not intend consciously.
 
 21
-00:02:06,285 --> 00:02:12,625
-of conscious intent which is the shallow kind of intent that unless it engages some kind
+00:02:00,468 --> 00:02:06,308
+because when you interact with AI as you write, you're putting yourself into the space
 
 22
-00:02:12,645 --> 00:02:16,805
-of menial piece of technical writing is not going to produce good writing.
+00:02:06,328 --> 00:02:12,428
+of conscious intent, which is the shallow kind of intent that unless it engages some
 
 23
-00:02:18,505 --> 00:02:24,892
-And when you lose this access to the unconscious mind and therefore
+00:02:12,448 --> 00:02:16,808
+kind of menial piece of technical writing is not going to produce good writing.
 
 24
-00:02:24,912 --> 00:02:31,812
-intent in its main literary form,
+00:02:18,468 --> 00:02:24,968
+And when you lose this access to the unconscious mind and therefore,
 
 25
-00:02:31,832 --> 00:02:38,372
-which is to say intent that means that there's a psychological reality in the
+00:02:27,136 --> 00:02:33,496
+intent in its main literary form, which is to say
 
 26
-00:02:38,392 --> 00:02:44,732
-author and that somehow that is converted onto markings on the page
+00:02:33,516 --> 00:02:40,476
+intent that means that there's a psychological reality in the author and that somehow
 
 27
-00:02:44,752 --> 00:02:51,472
-in a way that the author absolutely intends but is not under his or her conscience. that's
+00:02:40,496 --> 00:02:47,156
+that is converted onto markings on the page in a way that the author absolutely
 
 28
-00:02:51,492 --> 00:02:57,592
-what you lose. so the problem here is that of course authorial intent is essentially
+00:02:47,176 --> 00:02:49,956
+intends, but it's not under his or her conscious control.
 
 29
-00:02:57,612 --> 00:03:03,552
-the main concept in literature as an art.
+00:02:51,336 --> 00:02:57,576
+that's what you lose. So the problem here is that of course authorial intent is essentially
 
 30
-00:03:03,572 --> 00:03:10,372
-now you might say is that less
+00:02:57,596 --> 00:02:59,116
+the main concept
 
 31
-00:03:10,392 --> 00:03:15,572
-important if one is writing a piece of political analysis rather than fiction or rather
+00:03:01,276 --> 00:03:08,176
+in literature as an art. Now you might say
 
 32
-00:03:15,592 --> 00:03:20,612
-than a properly stylized work of philosophy? yeah, shock matters less. You're going to
+00:03:08,196 --> 00:03:14,716
+is that less important if one is writing a piece of political analysis rather than
 
 33
-00:03:20,632 --> 00:03:26,172
-lose a lot less civilization if Applebaum starts writing her pieces for the Atlantic
+00:03:14,736 --> 00:03:19,596
+fiction or rather than a properly stylized work of philosophy? Yeah, short matters less,
 
 34
-00:03:26,192 --> 00:03:32,828
-with AI than if whoever you might consider the leading living novelist.
+00:03:19,616 --> 00:03:25,496
+you're going to lose a lot less civilization if an Applebaum starts writing her pieces
 
 35
-00:03:32,848 --> 00:03:37,328
-writing with the help of AI going forward.
+00:03:25,516 --> 00:03:32,156
+for the Atlantic with AI than if whoever you might consider the leading living
 
 36
-00:03:38,848 --> 00:03:43,148
-So you're going to lose the concept of a total intent, which is the main
+00:03:32,176 --> 00:03:37,236
+novelist writing with the help of AI going forward.
 
 37
-00:03:43,168 --> 00:03:49,968
-concept in Western literature. You
+00:03:38,856 --> 00:03:43,147
+So you're going to lose the concept of a total intent, which is the main
 
 38
-00:03:49,988 --> 00:03:55,128
-also then by extension going to lose concept of style. So
+00:03:43,167 --> 00:03:49,967
+concept in Western literature. You
 
 39
-00:03:55,148 --> 00:04:01,796
-style are those non-shallower features that
+00:03:49,987 --> 00:03:52,987
+also then by extension going to lose the concept of style.
 
 40
-00:04:01,816 --> 00:04:07,216
-define the way a writer works,
+00:03:55,027 --> 00:04:01,787
+so style are those non-shallower features that
 
 41
-00:04:07,236 --> 00:04:13,656
-that can never be reduced to a set of surface signatures, right,
+00:04:01,807 --> 00:04:07,187
+define the way a writer works
 
 42
-00:04:13,676 --> 00:04:17,916
-but are always seen in the work. I mean, let me try to give you a couple of examples
+00:04:07,207 --> 00:04:13,567
+that can never be reduced to a set of surface signatures, right,
 
 43
-00:04:17,936 --> 00:04:23,756
-in a somewhat lame way from my own writing because I sort of half think I have a style
+00:04:13,587 --> 00:04:17,947
+but are always seen in the work. I mean, let me try to give you a couple of examples
 
 44
-00:04:23,776 --> 00:04:28,416
-of my own as a philosophical writer, but I only quarter have a style of my own as a public
+00:04:17,967 --> 00:04:23,767
+in a somewhat lame way from my own writing because I sort of half thing I have a style
 
 45
-00:04:28,436 --> 00:04:29,296
-intellectual writer.
+00:04:23,787 --> 00:04:28,427
+of my own as a philosophical writer, but I only quarter have a style of my own as a public
 
 46
-00:04:31,096 --> 00:04:36,676
-So, but even with my public intellectual writing, there is a little bit of
+00:04:28,447 --> 00:04:29,327
+intellectual writer.
 
 47
-00:04:36,696 --> 00:04:43,396
-stylistic quality there. So what's that like? Well, it's going to have 11 or
+00:04:31,107 --> 00:04:36,647
+So, but even with my public intellectual writing, there is a little bit of
 
 48
-00:04:43,416 --> 00:04:44,856
-29 features.
+00:04:36,667 --> 00:04:43,387
+stylistic quality there. So what's that like? Well, it's going to have 11 or
 
 49
-00:04:46,696 --> 00:04:53,616
-Or which one could be that I tend to
+00:04:43,407 --> 00:04:45,087
+29 features.
 
 50
-00:04:53,636 --> 00:04:58,976
-put human activities occurring in our culture
+00:04:46,707 --> 00:04:50,547
+which one could be that I,
 
 51
-00:04:58,996 --> 00:05:06,496
-with a level of simplicity and directness that
+00:04:52,479 --> 00:04:58,999
+tend to put human activities occurring in our culture
 
 52
-00:05:10,252 --> 00:05:16,572
-the effect of making people who read this put this activity in the
+00:04:59,019 --> 00:05:05,139
+with a level of simplicity and directness
 
 53
-00:05:16,592 --> 00:05:22,692
-context of the full possibilities of history and human nature. So
+00:05:05,159 --> 00:05:11,139
+that has the effect
 
 54
-00:05:22,712 --> 00:05:28,512
-when I write something about what Kemi Beidnock is doing, the leader of the Conservative
+00:05:11,159 --> 00:05:17,859
+of making people who read this put this activity in the context of
 
 55
-00:05:28,612 --> 00:05:31,612
-I'm going to have a lot of work on the way to do it. party in the UK. I'll write it in
+00:05:17,879 --> 00:05:24,619
+the full possibilities of history and human nature. so when I write something
 
 56
-00:05:31,632 --> 00:05:37,922
-such a way that even without you being consciously aware of it, it might trigger in you
+00:05:24,639 --> 00:05:29,499
+about what Kemi Batenock is doing, the leader of the Conservative Party in the UK,
 
 57
-00:05:37,942 --> 00:05:42,682
-the thought, well, how would a political actor have handled this 500 years ago?
+00:05:30,919 --> 00:05:37,179
+I'll write it in such a way that even without you being consciously aware of it, it might
 
 58
-00:05:45,662 --> 00:05:51,642
-So, I am not consciously aware I'm doing that, and yet I am.
+00:05:37,199 --> 00:05:42,279
+trigger in you the thought, well, how would a political actor have handled this 500 years
 
 59
-00:05:51,662 --> 00:05:58,482
-Now, I can talk about it when I'm not doing it, but when I am
+00:05:42,299 --> 00:05:48,839
+ago? so I am not consciously aware I'm doing
 
 60
-00:05:58,502 --> 00:06:05,302
-doing it, it's going to have a degree of unconscious
+00:05:48,859 --> 00:05:53,179
+that, and yet I am. Now,
 
 61
-00:06:05,322 --> 00:06:10,982
-control, if you like. And if I completely made that control conscious, then the effect
+00:05:54,079 --> 00:06:00,857
+I can talk about it when I'm not doing it, but when I am doing it, it's going to have
 
 62
-00:06:11,002 --> 00:06:15,542
-wouldn't quite work. Actually, it'd be too mechanical and it wouldn't have the successful
+00:06:00,877 --> 00:06:07,757
+a degree of unconscious control, if you like. And
 
 63
-00:06:15,562 --> 00:06:22,402
-transmission to the reader. Because if
+00:06:07,777 --> 00:06:12,437
+if I completely made that control conscious, then the effect wouldn't quite work. Actually,
 
 64
-00:06:22,422 --> 00:06:26,542
-I'm too conscious in the way I control it, what will happen is that the reader thinks,
+00:06:12,457 --> 00:06:15,497
+it'd be too mechanical and it wouldn't have the successful
 
 65
-00:06:26,562 --> 00:06:32,122
-oh, Vlad is trying to make me think that. Whereas if I do it with the unconscious, the
+00:06:15,517 --> 00:06:20,577
+transmission to the reader.
 
 66
-00:06:32,142 --> 00:06:36,482
-reader is actually more likely to think, oh, suddenly I'm thinking of this as I read
+00:06:21,217 --> 00:06:25,397
+because if I'm too conscious in the way I control it, what will happen is that the reader
 
 67
-00:06:36,502 --> 00:06:43,482
-this. How interesting. And that's the effect of a successfully realized
+00:06:25,417 --> 00:06:30,877
+thinks, oh, Vlad is trying to make me think that. Whereas if I do it with the unconscious
 
 68
-00:06:45,622 --> 00:06:50,722
-intent that is untransparent to the conscious mind and stylistic.
+00:06:30,897 --> 00:06:34,017
+control, the reader is actually more likely to think, oh,
 
 69
-00:06:50,742 --> 00:06:57,202
-That's the beginning of that conversation? I mean, does
+00:06:34,797 --> 00:06:38,337
+suddenly I'm thinking of this as I read this, how interesting. And that's the effect
 
 70
-00:06:57,222 --> 00:06:59,742
-that give you a couple of cents? Lots of love.
+00:06:38,357 --> 00:06:43,457
+of a successfully realized
+
+71
+00:06:43,477 --> 00:06:49,857
+authorial intent that is untransparent to the conscious mind and
+
+72
+00:06:49,877 --> 00:06:56,217
+stylistic. that's the beginning of that conversation. I
+
+73
+00:06:56,237 --> 00:06:59,737
+mean, does that, does that give you a couple of cents? Lots of love.
 

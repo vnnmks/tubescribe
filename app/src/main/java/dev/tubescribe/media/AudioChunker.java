@@ -29,14 +29,21 @@ import java.util.logging.Logger;
  * approach Groq's 25 MB upload limit, so even hour-long videos cost only a
  * couple of seconds of file copying here.</p>
  *
- * <p>Consecutive chunks overlap: when a chunk's exclusive territory reaches
- * the byte budget, the seam location is noted but writing continues for one
- * more {@link #OVERLAP_US} window, and the next chunk then seeks back to one
- * window before the seam. Whisper therefore always hears several seconds of
- * context around every cut, which keeps sentences and words at the boundary
- * intact; cue ownership between the overlapping transcriptions is decided
- * by clean file-end partitioning in {@code GroqTranscriber}, so the shared
- * audio never appears twice.</p>
+ * <p>Consecutive chunks are sequential: one chunk file runs from where the
+ * previous file ends to its own seam, plus one tail window — there is no
+ * special head and no seeking back. The audio just before a seam lives only
+ * in the previous chunk's tail region, and the next request then begins
+ * exactly where the previous request's conditioning text (the prior
+ * transcript sent as the Whisper {@code prompt}) stops: the model hears a
+ * continuation, not a replay. This
+ * replaced the older rewound-head overlap after whisper repeatedly
+ * suppressed the seam continuation: prompt text spoken again in the
+ * audio is treated as an echo to skip, and the suppression extended
+ * into the first words after it — at 01:50 of the reference video the
+ * phrase "intend consciously" vanished from every overlapping-chunk
+ * transcript. Cue ownership between chunk files is a plain partition by
+ * file boundaries in {@code GroqTranscriber}; unmatched jitter is
+ * handled there too.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
@@ -45,10 +52,12 @@ public final class AudioChunker {
     public static final long MAX_CHUNK_BYTES = 24_000_000L;
     /** Smallest sane exclusive territory so tiny debug limits still work. */
     private static final long MIN_CHUNK_BYTES = 128 * 1024;
-    /** Audio kept on both sides of every chunk seam, so whisper has context. */
-    public static final long OVERLAP_US = 20_000_000L;
-    /** Safety factor for the estimated overlap bytes (VBR headroom). */
-    private static final double OVERLAP_SAFETY = 1.5;
+    /** Audio kept past every chunk's seam: this chunk still transcribes it
+     * (as the end of its file, where it reads the seam phrase whole), and
+     * the next chunk's file starts cleanly after it. */
+    public static final long TAIL_US = 20_000_000L;
+    /** Safety factor for the estimated tail margin bytes (VBR headroom). */
+    private static final double TAIL_SAFETY = 1.5;
     private static final int SAMPLE_BUFFER_BYTES = 256 * 1024;
 
     private AudioChunker() {
@@ -59,11 +68,14 @@ public final class AudioChunker {
      *
      * @param file        the chunk written to disk
      * @param startUs     global PTS of the chunk's first audio sample; segment
-     *                    timestamps returned for this file are offsets from here
-     * @param authStartUs exclusive territory start (the previous seam); segments
-     *                    starting before it also exist in the previous chunk
-     * @param authEndUs   exclusive territory end (the next seam); segments
-     *                    starting at or after it also exist in the next chunk
+     *                    timestamps returned for this file are offsets from here;
+     *                    since chunks are sequential this is also the previous
+     *                    chunk's file end
+     * @param authStartUs the chunk's own first sample's PTS (the exclusive
+     *                    territory starts with the file); with sequential files
+     *                    no sample of this file exists in the previous chunk
+     * @param authEndUs   exclusive territory end (the next seam); samples from
+     *                    it on belong partly to this chunk's tail region
      * @param durationUs  container duration, for progress labels only
      */
     public record Chunk(File file, long startUs, long authStartUs, long authEndUs,
@@ -100,13 +112,15 @@ public final class AudioChunker {
             int lastPercent = -1;
 
             // Current chunk state. The chunk file covers, in global timeline
-            // time: one head overlap window, its exclusive territory, then one
-            // tail overlap window. startUs is the real first sample's PTS, so
-            // timestamps stay exact even when a seek lands on a sync frame.
+            // time: the region since the previous chunk's file ended (this
+            // chunk's exclusive territory), then one tail window past the
+            // declared seam. startUs is the real first sample's PTS, so
+            // timestamps stay exact; audio before it lives in the previous
+            // chunk's tail region.
             long chunkStartUs = 0;
-            long authStartUs = 0;     // previous seam; 0 for the first chunk
+            long authStartUs = 0;     // the chunk's own first sample's PTS; 0 for the first chunk
             long territoryEndUs = -1; // declared seam of this chunk; -1 = undecided
-            long territoryBytes = 0;  // bytes inside the territory (no head overlap)
+            long territoryBytes = 0;  // bytes inside the territory (no tail)
             long chunkBytes = 0;      // every byte written to this chunk so far
             boolean haveSample = false;
 
@@ -124,7 +138,7 @@ public final class AudioChunker {
 
                 // A territory ends where the byte budget would next be
                 // exceeded: the sample about to be written starts the next
-                // chunk. Writing continues for one more overlap window first.
+                // chunk. Writing continues for one tail window first.
                 if (territoryEndUs < 0 && territoryBytes > 0 && territoryBytes + size
                         > territoryBudgetBytes(limitBytes, territoryBytes,
                         pts - authStartUs)) {
@@ -133,26 +147,24 @@ public final class AudioChunker {
                             + "–" + Fmt.time(territoryEndUs / 1_000_000.0));
                 }
 
-                if (territoryEndUs >= 0 && pts - territoryEndUs >= OVERLAP_US) {
-                    // The full tail overlap window is written. Close the chunk
-                    // and rewind so the next chunk begins one window before the
-                    // seam; both files then contain the complete seam region.
-                    // Capture the seek target first: the resets below clear the
-                    // state it is computed from.
-                    final long seekUs = Math.max(0, territoryEndUs - OVERLAP_US);
+                if (territoryEndUs >= 0 && pts - territoryEndUs >= TAIL_US) {
+                    // The tail window is written. Close the chunk and let the
+                    // next file start at the very next sample — no rewind into
+                    // the seam region: that audio lives in this chunk only, and
+                    // the next request's prompt (the transcript so far) ends
+                    // right where this sample begins, so the model hears a
+                    // continuation instead of a reply of its own conditioning.
+                    // The triggering sample becomes the next chunk's first.
                     closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, territoryEndUs);
                     muxer = null;
                     chunkFile = null;
                     index++;
-                    authStartUs = territoryEndUs;
+                    authStartUs = pts;
                     territoryEndUs = -1;
                     territoryBytes = 0;
                     chunkBytes = 0;
                     haveSample = false;
-                    // Drop this buffer: the rewind re-delivers the region and
-                    // the sample is written again when its time comes.
-                    extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-                    continue;
+                    // No `continue`: this sample opens the next chunk below.
                 }
 
                 if (muxer == null) {
@@ -186,17 +198,9 @@ public final class AudioChunker {
                 }
             }
             if (muxer != null) {
-                if (haveSample) {
-                    // The final chunk's territory runs to the end of the audio.
-                    closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, Long.MAX_VALUE);
-                } else {
-                    // The audio ended inside the previous chunk's tail window,
-                    // so this rewound chunk would duplicate covered audio.
-                    safeStop(muxer);
-                    release(muxer);
-                    //noinspection ResultOfMethodCallIgnored
-                    chunkFile.delete();
-                }
+                // The final chunk's territory runs to the end of the audio;
+                // samples were always written before the muxer existed.
+                closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, Long.MAX_VALUE);
                 muxer = null;
             }
         } catch (final IOException | RuntimeException e) {
@@ -239,7 +243,7 @@ public final class AudioChunker {
     // ------------------------------------------------------------- utilities
 
     /** Effective per-chunk byte limit; a debug preference can shrink it to
-     * force multiple overlapping chunks on short test media. */
+     * force multiple sequential chunks on short test media. */
     private static long chunkLimitBytes() {
         try {
             final long debug = TubeApp.debugChunkLimit();
@@ -254,25 +258,25 @@ public final class AudioChunker {
     }
 
     /**
-     * Byte budget for one chunk's exclusive territory. Both overlap windows
-     * ride on top of it and must still fit inside the upload limit, so the
-     * budget is the limit minus two overlap margins.
+     * Byte budget for one chunk's exclusive territory. The tail window rides
+     * on top of it and must still fit inside the upload limit, so the budget
+     * is the limit minus one tail margin.
      */
     private static long territoryBudgetBytes(final long limitBytes, final long territoryBytes,
                                              final long spanUs) {
-        return Math.max(MIN_CHUNK_BYTES, limitBytes - 2 * overlapMarginBytes(
+        return Math.max(MIN_CHUNK_BYTES, limitBytes - tailMarginBytes(
                 limitBytes, territoryBytes, spanUs));
     }
 
-    /** Estimated sample bytes in one overlap window at the measured audio rate. */
-    private static long overlapMarginBytes(final long limitBytes, final long bytes,
-                                           final long spanUs) {
+    /** Estimated sample bytes in one tail window at the measured audio rate. */
+    private static long tailMarginBytes(final long limitBytes, final long bytes,
+                                        final long spanUs) {
         long margin = MIN_CHUNK_BYTES; // fallback until a rate can be measured
         if (spanUs > 1_000_000 && bytes > 0) {
             final double bytesPerSec = bytes / (spanUs / 1_000_000.0);
-            margin = Math.round(bytesPerSec * (OVERLAP_US / 1_000_000.0) * OVERLAP_SAFETY);
+            margin = Math.round(bytesPerSec * (TAIL_US / 1_000_000.0) * TAIL_SAFETY);
         }
-        // Never let both margins together eat more than half the (debug) limit.
+        // Never let the margin eat more than half the (debug) limit.
         final long maxMargin = Math.max(64 * 1024, (limitBytes - MIN_CHUNK_BYTES) / 2);
         return Math.min(margin, maxMargin);
     }

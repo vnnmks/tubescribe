@@ -26,7 +26,9 @@ public class GroqTranscriberParseTest {
                                     final double floor, final double acceptedEnd)
             throws Exception {
         final List<SubtitleCue> cues = new ArrayList<>();
-        transcriber.parseCues(body, offset, floor, cues, acceptedEnd, false, "test");
+        // Chunk runs 40 s past the offset unless a test needs a shorter end.
+        transcriber.parseCues(body, offset, floor, offset + 40.0,
+                cues, acceptedEnd, false, "test");
         return cues;
     }
 
@@ -183,11 +185,43 @@ public class GroqTranscriberParseTest {
         assertEquals("Hello world.", cues.get(0).text());
     }
 
-    /** A floor-dropped segment that ends only slightly past the floor is
-     * jitter of the already-transcribed seam, not a bridge — no cue covers
-     * it. */
+    /** Sequential chunks own their entire file: with the floor at the
+     * chunk's own start (the previous file ended exactly there), the whole
+     * response is kept and no head-zone segment is dropped. The phrase that
+     * used to vanish in a rewound head is the first speech of the file. */
     @Test
-    public void shortHeadExtendIsNotABridge() throws Exception {
+    public void sequentialChunkOwnsWholeResponseFromItsFileStart() throws Exception {
+        final String body = """
+                {"duration": 8.0,
+                 "segments": [
+                   {"start": 0.0, "end": 4.0,
+                    "text": " intend consciously because supervised"},
+                   {"start": 4.0, "end": 8.0,
+                    "text": " continuation astonishing the audience."}],
+                 "words": [
+                   {"word": "intend", "start": 0.2, "end": 0.7},
+                   {"word": "consciously", "start": 0.8, "end": 1.7},
+                   {"word": "because", "start": 1.8, "end": 2.2},
+                   {"word": "supervised", "start": 2.3, "end": 3.2},
+                   {"word": "continuation", "start": 4.0, "end": 5.2},
+                   {"word": "astonishing", "start": 5.3, "end": 6.2},
+                   {"word": "the", "start": 6.3, "end": 6.5},
+                   {"word": "audience.", "start": 6.6, "end": 7.4}]}""";
+        final List<SubtitleCue> cues = parse(body, 116.0, 116.0, 0.0);
+        assertEquals(2, cues.size());
+        assertEquals(116.2, cues.get(0).start(), 1e-9);
+        assertEquals(119.2, cues.get(0).end(), 1e-9);
+        assertEquals("intend consciously because supervised", cues.get(0).text());
+        assertEquals(120.0, cues.get(1).start(), 1e-9);
+        assertEquals("continuation astonishing the audience.", cues.get(1).text());
+    }
+
+    /** A floor-dropped segment whose tail grazes the floor carries no words
+     * of its own past it — with word timestamps present, bridging it by
+     * segment text would re-show audio the previous chunk already
+     * transcribed (with invented timing), so nothing is emitted. */
+    @Test
+    public void headExtendWithoutWordsPastFloorIsNotBridged() throws Exception {
         final String body = """
                 {"duration": 18.0,
                  "segments": [
@@ -210,5 +244,107 @@ public class GroqTranscriberParseTest {
         assertEquals(1, cues.size());
         assertEquals("Owned speech starts here.", cues.get(0).text());
         assertEquals(113.0, cues.get(0).start(), 1e-9);
+    }
+
+    /** Regression test for the seam at 01:56 of the reference video: the
+     * previous chunk's file ended mid-phrase, chunk 1 auto-completed it with
+     * hallucinated text, and the real words ("intend consciously") sat in a
+     * head-zone segment that ran only 2.0 s past the floor — inside the old
+     * 2.5 s gate, so they were discarded. An overhang carrying real words
+     * past the floor must bridge regardless. */
+    @Test
+    public void truncatedPhraseContinuationBridges() throws Exception {
+        final String body = """
+                {"duration": 18.0,
+                 "segments": [
+                   {"start": 5.0, "end": 12.0,
+                    "text": " and the author intends but does not intend consciously"},
+                   {"start": 13.0, "end": 18.0,
+                    "text": " Owned speech starts here."}],
+                 "words": [
+                   {"word": "and", "start": 5.0, "end": 5.4},
+                   {"word": "the", "start": 5.5, "end": 5.7},
+                   {"word": "author", "start": 5.8, "end": 6.3},
+                   {"word": "intends", "start": 6.4, "end": 6.9},
+                   {"word": "but", "start": 7.0, "end": 7.3},
+                   {"word": "does", "start": 7.4, "end": 7.7},
+                   {"word": "not", "start": 7.8, "end": 8.0},
+                   {"word": "intend", "start": 10.2, "end": 10.9},
+                   {"word": "consciously", "start": 11.0, "end": 11.95},
+                   {"word": "Owned", "start": 13.0, "end": 13.4},
+                   {"word": "speech", "start": 13.45, "end": 13.9},
+                   {"word": "starts", "start": 13.95, "end": 14.3},
+                   {"word": "here.", "start": 14.35, "end": 14.7}]}""";
+        // Chunk 1 never hears anything at or after the floor (its file ends
+        // there), so the continuation words are new audio and must surface —
+        // and the bridge must carry only those words, not the segment text
+        // from before the floor.
+        final List<SubtitleCue> cues = parse(body, 100.0, 110.0, 0.0);
+        assertEquals(2, cues.size());
+        assertEquals("intend consciously", cues.get(0).text());
+        assertEquals(110.2, cues.get(0).start(), 1e-9);
+        assertTrue(cues.get(0).end() <= 113.0 - 0.15 + 1e-9);
+        assertEquals("Owned speech starts here.", cues.get(1).text());
+    }
+
+    /** A wordless response still bridges from segment text (the last resort
+     * the whole transcript shares then), since there is no word boundary to
+     * split the shown text by. */
+    @Test
+    public void wordlessResponseStillBridgesByText() throws Exception {
+        final String body = """
+                {"duration": 18.0,
+                 "segments": [
+                   {"start": 5.0, "end": 12.0, "text": " and the phrase was cut"},
+                   {"start": 13.0, "end": 18.0,
+                    "text": " Owned speech starts here."}]}""";
+        final List<SubtitleCue> cues = parse(body, 100.0, 110.0, 0.0);
+        assertEquals(2, cues.size());
+        assertEquals(110.0, cues.get(0).start(), 1e-9);
+        assertEquals(112.0, cues.get(0).end(), 1e-9);
+        assertEquals("and the phrase was cut", cues.get(0).text());
+        assertEquals("Owned speech starts here.", cues.get(1).text());
+    }
+
+    /** Whisper sometimes completes audio the chunker cut mid-phrase with
+     * hallucinated trailing words whose timestamps run past the chunk's
+     * file end (measured: "exist." claimed to run 0.7 s beyond it). Such
+     * words name no real audio and are dropped, and no cue may stretch
+     * past the file end. */
+    @Test
+    public void phantomEofWordsAreDroppedAndEndsClamped() throws Exception {
+        final String body = """
+                {"duration": 6.0,
+                 "segments": [
+                   {"start": 0.0, "end": 6.0,
+                    "text": " speech ends here but does not exist."}],
+                 "words": [
+                   {"word": "speech", "start": 0.0, "end": 0.5},
+                   {"word": "ends", "start": 0.55, "end": 0.9},
+                   {"word": "here", "start": 0.95, "end": 1.4},
+                   {"word": "but", "start": 1.5, "end": 1.8},
+                   {"word": "does", "start": 1.9, "end": 2.1},
+                   {"word": "not", "start": 2.15, "end": 2.6},
+                   {"word": "exist.", "start": 4.9, "end": 5.8}]}""";
+        final List<SubtitleCue> cues = parse(body, 0.0,
+                Double.NEGATIVE_INFINITY, 0.0, 5.0);
+        for (final SubtitleCue cue : cues) {
+            assertFalse("hallucinated completion leaked into the cue: " + cue,
+                    cue.text().contains("exist."));
+            assertTrue("cue runs past the chunk audio: " + cue,
+                    cue.end() <= 5.0 + 1e-9);
+        }
+        assertEquals(1, cues.size());
+        assertEquals(2.6, cues.get(0).end(), 1e-9);
+        assertEquals("speech ends here but does not", cues.get(0).text());
+    }
+
+    private List<SubtitleCue> parse(final String body, final double offset,
+                                    final double floor, final double acceptedEnd,
+                                    final double chunkEnd) throws Exception {
+        final List<SubtitleCue> cues = new ArrayList<>();
+        transcriber.parseCues(body, offset, floor, chunkEnd,
+                cues, acceptedEnd, false, "test");
+        return cues;
     }
 }

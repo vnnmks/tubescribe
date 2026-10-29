@@ -20,10 +20,10 @@ import static org.junit.Assert.assertTrue;
  * Deterministic timing regression test for the seven-minute Vlad Vexler
  * video (id {@code sc_3VyrAiv4}), the speech-heavy reference video used
  * throughout development. The fixture is the transcript actually measured
- * on the device (5 overlapping chunks, word timestamps, on-device SRT
- * captured after the continuous-word/fold rewrite); every executed build
- * re-parses it, so a grouping or ownership change that breaks timing or
- * readability fails here instead of on the phone.
+ * on the device (3 sequential chunks, word timestamps, on-device SRT
+ * captured after the sequential-chunk/continuous-word rewrite); every
+ * executed build re-parses it, so a grouping or ownership change that
+ * breaks timing or readability fails here instead of on the phone.
  *
  * <p>The fixture pins the accepted invariants of the pipeline's output
  * format — it does not re-transcribe anything, so it is fully
@@ -86,9 +86,8 @@ public class SrtTimingTest {
 
     @Test
     public void pinsFixtureCueCount() throws IOException {
-        // 70 cues measured on the device after the continuous-word pass
-        // (down from 82 with per-segment grouping, 4 of them one-word
-        // subtitles).
+        // 73 cues measured on the device with sequential chunks (down from
+        // 82 with per-segment grouping over overlapping chunks).
         final List<SubtitleCue> cues = loadFixture();
         assertTrue("fixture cue count shifted unexpectedly: " + cues.size(),
                 cues.size() >= 50 && cues.size() <= 90);

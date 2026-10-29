@@ -32,21 +32,24 @@ import java.util.logging.Logger;
  *
  * <p>Audio arrives as pre-split {@code .m4a} chunks (see
  * {@link dev.tubescribe.media.AudioChunker}), each below the 25 MB upload
- * limit, and consecutive chunks deliberately overlap: Whisper always hears
- * several seconds of context around every seam, so no word is cut off there.
- * Each chunk is posted as multipart form data with
+ * limit, and chunks are sequential: chunk {@code i+1}'s file starts exactly
+ * where chunk {@code i}'s file ends, with no special head. The accepted tail
+ * text rides along as the Whisper {@code prompt}, so a chunk's conditioning
+ * text ends precisely where its audio begins: the model transcribes a
+ * continuation, not a replay. (Earlier builds kept a rewound head that
+ * echoed the prompt text in audio; whisper suppresses prompt echoes, and the
+ * suppression swallowed the phrase right after them — at 01:50 of the
+ * reference video "intend consciously" vanished from every overlapping-chunk
+ * transcript, since replaced by chunk-level seam words trimmed of phantom
+ * completions.) Each chunk is posted as multipart form data with
  * {@code response_format=verbose_json} and word granularities, so segments
  * carry chunk-relative timestamps and every word its own start/end: cue
- * timing comes from the words a cue shows, not from a split guess. Cue transcription ownership is a clean partition by chunk file
- * ends: each chunk keeps only segments starting after the previous chunk's
- * file ends, which hands the seam region to the previous chunk (whose
- * transcription of that audio is anchored inside a stable file) and avoids
- * the misattributed first segments whisper produces at the head of a file,
- * especially with a {@code prompt}. Segments of that unreliable head zone
- * that run well past the previous chunk's file end are bridged back in from
- * that point, covering audio the previous chunk could not hear. The accepted
- * tail text is sent as that {@code prompt}, keeping voice and formatting
- * continuous across seams.
+ * timing comes from the words a cue shows, not from a split guess. Cue
+ * transcription ownership is a clean partition by chunk file boundaries:
+ * each chunk owns its own file's audio outright. The floor partition stays
+ * as jitter handling — a returned segment time may land a hair before the
+ * file start — and a floor-dropped segment that runs past the floor still
+ * bridges the gap left where the previous chunk's file ended mid-sentence.</p>
  * All configured API keys are tried in order: rate limits move the request
  * to the next key and rejected keys are retired for the rest of the session.</p>
  */
@@ -62,10 +65,15 @@ public final class GroqTranscriber {
      * as timing-jitter duplicates of audio already transcribed. */
     private static final double DUPLICATE_SLACK_SEC = 0.05;
     /** A segment that starts in the head zone (before the ownership floor)
-     * extends at least this far past the floor to count as a seam bridge:
-     * shorter runs are just the same sentence's jitter, which the previous
-     * chunk already transcribed from a stable position. */
-    private static final double BRIDGE_MIN_EXTEND_SEC = 2.5;
+     * counts as a seam bridge when it runs this far past the floor: below
+     * that, whisper's segment end merely grazes it with no phrase-carrying
+     * words behind (the word-span gate still applies). The gate is not a
+     * duplicate guard: everything at and after the floor is audio the
+     * previous chunk never heard, because its file ended there — and that
+     * end-of-file zone is exactly where whisper completes a mid-phrase
+     * truncation with hallucinated text, so the next chunk's continuation
+     * must not be discarded even into the second second. */
+    private static final double BRIDGE_MIN_EXTEND_SEC = 1.0;
     /** Bridges shorter than this are not worth a cue. */
     private static final double BRIDGE_MIN_SPAN_SEC = 1.0;
     /** Earliest a following owned segment may start relative to the bridge
@@ -74,6 +82,11 @@ public final class GroqTranscriber {
     /** Upper bound on a bridge span; a stretch artefact longer than this
      * carries no trustworthy timing at all. */
     private static final double BRIDGE_CAP_SEC = 30.0;
+    /** Word timestamps this far past the chunk's audio end cannot name real
+     * audio: whisper sometimes completes a file that ends mid-phrase with
+     * hallucinated words placed beyond the end. Such trailing words are
+     * dropped before cue building. */
+    private static final double MAX_WORD_PAST_END_SEC = 0.15;
     /** Tail text handed to the next request as Whisper's prompt continuation. */
     private static final int PROMPT_CHARS = 200;
 
@@ -126,22 +139,14 @@ public final class GroqTranscriber {
             }
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
                     prompt, keys, listener, i, total, cancel);
-            // Cue ownership by file-end partitioning: a chunk transcribes its
-            // own head overlap (the previous chunk's tail) plus its first in-
-            // territory window with unreliable timestamps — whisper orients
-            // over the first seconds of a file and, prompted by the previous
-            // chunk's tail text, smears several sentences into a stretched
-            // first segment there (measured ~30 s segments). The previous
-            // chunk heard that same audio from well inside a stable file, so
-            // it keeps the seam region, and this chunk's transcript is only
-            // trusted from where the previous chunk's file ends — except for
-            // a floor-dropped segment running past it, which bridges the
-            // gap left where the previous chunk's file ended mid-sentence
-            // (see parseCues).
-            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY
-                    : (chunks.get(i - 1).startUs() + chunks.get(i - 1).durationUs())
-                    / 1_000_000.0;
-            acceptedEndSec = parseCues(body, offset, startFloorSec,
+            // Cue ownership with sequential chunks: a chunk owns its whole
+            // file outright — the file starts where the previous one ends, so
+            // the partition IS the chunk sequence. The floor (the chunk's own
+            // file start) only guards residual timing jitter, e.g. a segment
+            // returned at −0.02 relative to the file; a floor-dropped tail
+            // that runs past the floor bridges in (see parseCues).
+            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY : offset;
+            acceptedEndSec = parseCues(body, offset, startFloorSec, chunkEnd,
                     cues, acceptedEndSec, verbose, (i + 1) + "/" + total);
             prompt = promptTail(cues);
             listener.update((i + 1) / (double) total,
@@ -335,9 +340,12 @@ public final class GroqTranscriber {
      * plus a seam bridge for floor-dropped segments that run past it.
      *
      * @param offset         global PTS of the chunk's first sample (seconds)
-     * @param startFloorSec  segments starting before it belong to the previous
-     *                       chunk's transcription (which heard them from inside
-     *                       a stable file); {@code -inf} for the first chunk
+     * @param startFloorSec  segments starting before it are timestamp jitter
+     *                       (sequential files start here; a normal response
+     *                       has nothing before the floor); {@code -inf} for
+     *                       the first chunk
+     * @param chunkEndSec    end of the chunk's audio on the global timeline;
+     *                       no real cue can outlive it
      * @param acceptedEndSec end of the last cue accepted so far; segments
      *                       starting inside it are timing-jitter duplicates
      * @param verbose        debug-logging gate (each segment + drop reason)
@@ -345,10 +353,11 @@ public final class GroqTranscriber {
      * @return the updated end of the last accepted cue
      */
     double parseCues(final String body, final double offset,      // visible for tests
-                             final double startFloorSec,
-                             final List<SubtitleCue> cues, final double acceptedEndSec,
-                             final boolean verbose, final String tag)
+                              final double startFloorSec, final double chunkEndSec,
+                              final List<SubtitleCue> cues, final double acceptedEndSec,
+                              final boolean verbose, final String tag)
             throws IOException {
+        final int firstNew = cues.size();
         double latestEnd = acceptedEndSec;
         try {
             final JsonObject json = JsonParser.object().from(body);
@@ -363,9 +372,10 @@ public final class GroqTranscriber {
             }
             if (segments == null || segments.isEmpty()) {
                 // No segment timestamps: the top-level text covers the chunk.
-                // For chunks that overlap their neighbors this fallback is
-                // dropped entirely — the overlap both neighbors transcribed
-                // carries the same audio.
+                // With sequential files the fallback only ever fires for the
+                // first chunk (a floor at the file start would drop it); a
+                // wordless tail chunk then contributes nothing but its
+                // retranscribed owner still covers the audio it trimmed.
                 final String text = json.getString("text", "").strip();
                 final double duration = json.getDouble("duration", 30.0);
                 if (!text.isEmpty() && startFloorSec < offset && acceptedEndSec <= offset) {
@@ -405,20 +415,36 @@ public final class GroqTranscriber {
                 }
                 if (!bridgeText.isEmpty() && clipped - startFloorSec >= BRIDGE_MIN_SPAN_SEC) {
                     final List<dev.tubescribe.subs.CueBuilder.WordSpan> bridgeWords =
-                            wordSpans(words, offset, startFloorSec, clipped);
-                    if (verbose) {
-                        LOG.info("Groq " + tag + " bridge: " + Fmt.time(startFloorSec)
-                                + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160)
-                                + (bridgeWords.isEmpty() ? ""
-                                : " (" + bridgeWords.size() + " words)"));
-                    }
-                    if (bridgeWords.isEmpty()) {
+                            trimPhantomWords(
+                                    wordSpans(words, offset, startFloorSec, clipped),
+                                    chunkEndSec);
+                    if (words != null && words.size() > 0 && bridgeWords.isEmpty()) {
+                        // Word timestamps exist, but none land in the
+                        // overhang: bridging by segment text would re-show
+                        // audio the previous chunk already transcribed, with
+                        // invented timing. The owned segments carry the
+                        // reliable continuation.
+                        if (verbose) {
+                            LOG.info("Groq " + tag + " bridge skipped: no words past "
+                                    + Fmt.time(startFloorSec));
+                        }
+                    } else if (bridgeWords.isEmpty()) {
                         cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
                                 startFloorSec, clipped - startFloorSec, bridgeText));
+                        if (verbose) {
+                            LOG.info("Groq " + tag + " bridge: " + Fmt.time(startFloorSec)
+                                    + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160)
+                                    + " (text only)");
+                        }
                     } else {
                         cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(bridgeWords));
+                        if (verbose) {
+                            LOG.info("Groq " + tag + " bridge: " + Fmt.time(startFloorSec)
+                                    + "–" + Fmt.time(clipped) + " | " + clip(bridgeText, 160)
+                                    + " (" + bridgeWords.size() + " words)");
+                        }
                     }
-                    latestEnd = Math.max(latestEnd, clipped);
+                    latestEnd = Math.max(latestEnd, Math.min(clipped, chunkEndSec));
                 }
             }
             // Pass 2: decide ownership, drop duplicates, and mark the owned
@@ -463,10 +489,12 @@ public final class GroqTranscriber {
             // spoken words still drive cue timing directly.
             final List<dev.tubescribe.subs.CueBuilder.WordSpan> ownedWords = ownedFrom < 0
                     ? List.of()
-                    : wordSpans(words, offset, ownedFrom - 0.02, ownedTo + 0.02);
+                    : trimPhantomWords(
+                            wordSpans(words, offset, ownedFrom - 0.02, ownedTo + 0.02),
+                            chunkEndSec);
             if (!ownedWords.isEmpty()) {
                 cues.addAll(dev.tubescribe.subs.CueBuilder.fromWords(ownedWords));
-                latestEnd = Math.max(latestEnd, ownedTo);
+                latestEnd = Math.max(latestEnd, Math.min(ownedTo, chunkEndSec));
             } else {
                 // Character-share fallback: no word list came back (or none
                 // inside the owned territory), so split each owned segment's
@@ -480,13 +508,39 @@ public final class GroqTranscriber {
                             start, Math.max(end, start + 0.4) - start, text));
                 }
                 if (ownedFrom >= 0) {
-                    latestEnd = Math.max(latestEnd, ownedTo);
+                    latestEnd = Math.max(latestEnd, Math.min(ownedTo, chunkEndSec));
                 }
             }
         } catch (final com.grack.nanojson.JsonParserException e) {
             throw new IOException("Groq returned an unreadable response: " + e.getMessage(), e);
         }
+        // No audio exists past the chunk's file end: a cue may not claim
+        // that time, however whisper's segment growth placed it.
+        for (int i = firstNew; i < cues.size(); i++) {
+            final SubtitleCue cue = cues.get(i);
+            if (cue.end() > chunkEndSec) {
+                cues.set(i, new SubtitleCue(cue.start(), chunkEndSec, cue.text()));
+            }
+        }
         return latestEnd;
+    }
+
+    /** Drops trailing word timestamps that claim the chunk's audio kept
+     * speaking past its file end. When the chunker cuts mid-phrase, whisper
+     * sometimes completes the truncation with hallucinated text — placed
+     * beyond the end it had no audio for — and the last words' timestamps
+     * run past the end with it: that text is a model guess, not speech, and
+     * the following chunk transcribes that audio properly from the exact
+     * point the file ended. */
+    private static List<dev.tubescribe.subs.CueBuilder.WordSpan> trimPhantomWords(
+            final List<dev.tubescribe.subs.CueBuilder.WordSpan> words,
+            final double chunkEndSec) {
+        final double limit = chunkEndSec + MAX_WORD_PAST_END_SEC;
+        int last = words.size();
+        while (last > 0 && words.get(last - 1).end() > limit) {
+            last--;
+        }
+        return last == words.size() ? words : words.subList(0, last);
     }
 
     /** Short single-line text prefix for debug logs. */
