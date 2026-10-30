@@ -91,13 +91,19 @@ fun AppNav(viewModel: TubeViewModel) {
                 onBack = { screen = "home" },
                 onOpenKeys = { screen = "keys" },
                 onOpenCache = { screen = "cache" },
-                onOpenAbout = { screen = "about" }
+                onOpenAbout = { screen = "about" },
+                onOpenUpdates = { screen = "updates" }
             )
         }
 
         "about" -> {
             BackHandler { screen = "settings" }
             AboutScreen(onBack = { screen = "settings" })
+        }
+
+        "updates" -> {
+            BackHandler { screen = "settings" }
+            UpdateScreen(onBack = { screen = "settings" })
         }
 
         "keys" -> {

@@ -54,6 +54,19 @@ which model made them, so switching models re-transcribes a cached video on
 the next fetch while reusing the downloaded video. Settings → **About** shows
 these mappings and the app version.
 
+## Updates
+
+Settings → **App updates** checks the latest public GitHub release. When a
+newer version is published, the screen downloads the APK attached to that
+release and hands it to Android's installer. Android asks you to confirm each
+install; the first time, allow TubeScribe to install unknown apps. Cached
+videos, API keys and settings are kept.
+
+Release builds are signed with the local key described by
+`keystore.properties` (copy `keystore.properties.example`). The properties
+file and `/keystore/` are gitignored, so builds on another machine need the
+same key to install over an existing copy.
+
 ## Building
 
 Requires JDK 17 and the Android SDK (set `sdk.dir` in `local.properties`).
@@ -61,6 +74,7 @@ Requires JDK 17 and the Android SDK (set `sdk.dir` in `local.properties`).
 ```
 gradlew assembleDebug      # APK at app/build/outputs/apk/debug/app-debug.apk
 gradlew installDebug       # install on a connected device
+gradlew assembleRelease    # signed APK at app/build/outputs/apk/release/app-release.apk
 ```
 
 ## License

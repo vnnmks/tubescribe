@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -42,7 +43,8 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenKeys: () -> Unit,
     onOpenCache: () -> Unit,
-    onOpenAbout: () -> Unit
+    onOpenAbout: () -> Unit,
+    onOpenUpdates: () -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -79,6 +81,13 @@ fun SettingsScreen(
                 title = "Caching videos",
                 subtitle = "How long and how many downloads are kept — starred ones stay forever",
                 onClick = onOpenCache
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingsRow(
+                icon = Icons.Default.SystemUpdate,
+                title = "App updates",
+                subtitle = "Check GitHub for a newer version and install it",
+                onClick = onOpenUpdates
             )
             Spacer(Modifier.height(10.dp))
             SettingsRow(
