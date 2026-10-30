@@ -27,10 +27,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -79,6 +77,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -86,9 +85,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -101,15 +101,21 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import dev.tubescribe.TubeApp
+import dev.tubescribe.subs.CueBuilder
 import dev.tubescribe.subs.SubtitleCue
 import dev.tubescribe.subs.SubtitleTrack
 import dev.tubescribe.util.Fmt
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+// Subtitles always assume a 16:9 video. Their max width is the full width of
+// that frame in the windowed player; fullscreen keeps the exact same pixel
+// width on purpose, so entering fullscreen never changes the subtitle's size.
+private const val VIDEO_ASPECT_RATIO = 16f / 9f
+private val WINDOWED_VIDEO_HEIGHT = 240.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -243,53 +249,32 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     // ------------------------------------------- draggable subtitle overlay
     var videoSize by remember { mutableStateOf(IntSize.Zero) }
     var subsSize by remember { mutableStateOf(IntSize.Zero) }
-    // User-placed position (top-left, px) and whether the user placed it at all.
-    var subsPlaced by remember { mutableStateOf(TubeApp.subtitlePlaced) }
-    var placedPos by remember { mutableStateOf(Offset.Zero) }
-    // Effective rendered position; always kept inside the video box.
-    var renderPos by remember { mutableStateOf(Offset.Zero) }
-    var overlayMeasured by remember { mutableStateOf(false) }
-    var restoredOnce by remember { mutableStateOf(false) }
-
-    // Compute the rendered position every frame: default (bottom center) until the
-    // user drags; afterwards the placed position, clamped to stay on the video.
-    // The inset is CONSTANT — it must never depend on controls visibility, or the
-    // subtitle would jump every time the progress bar opens/hides. When the bar
-    // overlaps the subtitle, the bar simply draws on top of it.
-    if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
-        val insetPx = with(androidx.compose.ui.platform.LocalDensity.current) {
-            12.dp.toPx()
-        }
-        val targetY =
-            if (subsPlaced && restoredOnce) {
-                placedPos.y
-            } else {
-                (videoSize.height - subsSize.height) - insetPx
-            }
-        // Horizontal placement is not user-controlled: the pill is always
-        // centered, no matter where it was dragged vertically.
-        val clamped = Offset(
-            (videoSize.width - subsSize.width) / 2f,
-            targetY.coerceIn(0f, (videoSize.height - subsSize.height).coerceAtLeast(0).toFloat())
+    // Max subtitle width in raw pixels: 100% of the 16:9 frame in the windowed
+    // (240 dp-tall) player. smallestScreenWidthDp is the portrait (short-side)
+    // width and does not change with rotation or system bars, so fullscreen
+    // keeps exactly the same pixel width — rotating never resizes the pill.
+    val subtitleMaxWidthPx = with(LocalDensity.current) {
+        minOf(
+            configuration.smallestScreenWidthDp.dp.toPx(),
+            WINDOWED_VIDEO_HEIGHT.toPx() * VIDEO_ASPECT_RATIO
         )
-        if (clamped != renderPos) {
-            renderPos = clamped
-        }
-        if (!overlayMeasured) {
-            overlayMeasured = true
-        }
     }
+    // User-placed vertical center as a fraction of the video height. Null means
+    // the default bottom-center spot.
+    var subsCenterY by remember {
+        mutableStateOf(if (TubeApp.subtitlePlaced) TubeApp.subtitleCenterY else null)
+    }
+    // Effective rendered position (top-left, px); always kept inside the video
+    // box. Written while the pill is laid out, so it always matches the CURRENT
+    // cue's measured size.
+    var renderPos by remember { mutableStateOf(Offset.Zero) }
 
-    // Restore the saved position once sizes are known.
-    LaunchedEffect(videoSize, subsSize) {
-        if (!overlayMeasured || restoredOnce || !subsPlaced) return@LaunchedEffect
-        restoredOnce = true
-        placedPos = Offset(
-            (videoSize.width - subsSize.width) / 2f,
-            TubeApp.subtitleCenterY * videoSize.height - subsSize.height / 2f
-        )
-        // Discard any horizontal position saved by older versions.
+    // Double-tapping the pill restores the default position.
+    val resetSubtitleDefaults = {
+        subsCenterY = null
+        TubeApp.subtitlePlaced = false
         TubeApp.subtitleCenterX = 0.5f
+        TubeApp.subtitleCenterY = 0.85f
     }
 
     // Persist the overlay's center as a fraction of the video area so the
@@ -299,8 +284,8 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         if (videoSize.width > 0 && videoSize.height > 0 && subsSize.width > 0) {
             TubeApp.subtitlePlaced = true
             TubeApp.subtitleCenterX = 0.5f
-            TubeApp.subtitleCenterY =
-                (renderPos.y + subsSize.height / 2f) / videoSize.height
+            TubeApp.subtitleCenterY = subsCenterY
+                ?: ((renderPos.y + subsSize.height / 2f) / videoSize.height)
         }
     }
 
@@ -400,17 +385,17 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                     .fillMaxWidth()
                     .then(
                         if (fullscreen) Modifier.weight(1f)
-                        else Modifier.height(240.dp)
+                        else Modifier.height(WINDOWED_VIDEO_HEIGHT)
                     )
                     .background(Color.Black)
                     .onSizeChanged { videoSize = it }
                     .pointerInput(Unit) {
-                        // Subtitle drag + long-press reset, living on the VIDEO BOX and
-                        // running on the Initial pass. The Initial pass reaches this
-                        // ancestor BEFORE the child layers below (tap surface, CC
-                        // button, seek bar) process the same touch in the Main pass,
-                        // so consuming here starves them — that is what lets the pill
-                        // be dragged even when it sits under the progress bar.
+                        // Subtitle drag, living on the VIDEO BOX and running on the
+                        // VIDEO BOX and running on the Initial pass. The Initial pass
+                        // reaches this ancestor BEFORE the child layers below (tap
+                        // surface, CC button, seek bar) process the same touch in the
+                        // Main pass, so consuming here starves them — that is what lets
+                        // the pill be dragged even when it sits under the progress bar.
                         // Plain taps stay unconsumed so the controls keep working
                         // through the pill (YouTube-style).
                         awaitEachGesture {
@@ -418,6 +403,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 pass = PointerEventPass.Initial,
                                 requireUnconsumed = false
                             )
+
                             // Is the touch inside the pill (video-local coordinates)?
                             val onPill = subsSize.width > 0 &&
                                 down.position.x >= renderPos.x &&
@@ -425,76 +411,39 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 down.position.y >= renderPos.y &&
                                 down.position.y <= renderPos.y + subsSize.height
                             if (!onPill) return@awaitEachGesture
-                            var start = down.position
-                            var lastPos = start
+
+                            // A plain tap stays unconsumed and falls through to
+                            // the controls. A vertical move takes over as a drag;
+                            // a horizontal move is not ours and falls through too.
+                            var top = renderPos.y
+                            var lastPos = down.position
                             var drag = false
-                            var releasedEarly = false
-                            // Decide inside the long-press window: released early ->
-                            // plain tap (fall through to controls); moved beyond slop ->
-                            // drag; window expired -> long press.
-                            val decision = withTimeoutOrNull(
-                                viewConfiguration.longPressTimeoutMillis
-                            ) {
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    val pressed = event.changes.firstOrNull { it.pressed }
-                                    if (pressed == null) {
-                                        releasedEarly = true
-                                        break
-                                    }
-                                    val pos = pressed.position
-                                    val dy = pos.y - start.y
-                                    val dx = pos.x - start.x
-                                    // Vertical-only drag: start once the finger has
-                                    // moved far enough vertically. A horizontal
-                                    // gesture is not ours and falls through to the
-                                    // controls untouched.
+                            val maxY = (videoSize.height - subsSize.height)
+                                .coerceAtLeast(0).toFloat()
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val pressed = event.changes.firstOrNull { it.pressed }
+                                if (pressed == null) break
+                                val pos = pressed.position
+                                if (!drag) {
+                                    val dy = pos.y - down.position.y
+                                    val dx = pos.x - down.position.x
                                     if (abs(dy) > viewConfiguration.touchSlop) {
                                         drag = true
                                         lastPos = pos
+                                    } else if (abs(dx) > viewConfiguration.touchSlop) {
                                         break
                                     }
-                                    if (abs(dx) > viewConfiguration.touchSlop) break
+                                    continue
                                 }
+                                event.changes.forEach { it.consume() }
+                                top = (top + (pos.y - lastPos.y))
+                                    .coerceIn(0f, maxY)
+                                lastPos = pos
+                                subsCenterY = (top + subsSize.height / 2f) /
+                                    videoSize.height
                             }
-                            when {
-                                drag -> {
-                                    // Pill drag: pick up from wherever it renders and
-                                    // claim the whole gesture.
-                                    subsPlaced = true
-                                    restoredOnce = true
-                                    placedPos = renderPos
-                                    while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                        event.changes.forEach { it.consume() }
-                                        val pressed = event.changes.firstOrNull { it.pressed }
-                                        if (pressed == null) break
-                                        val pos = pressed.position
-                                        val maxY = (videoSize.height - subsSize.height)
-                                            .coerceAtLeast(0).toFloat()
-                                        placedPos = Offset(
-                                            (videoSize.width - subsSize.width) / 2f,
-                                            (placedPos.y + (pos.y - lastPos.y))
-                                                .coerceIn(0f, maxY)
-                                        )
-                                        lastPos = pos
-                                        renderPos = placedPos
-                                    }
-                                    persistSubtitlePos()
-                                }
-                                decision == null && !releasedEarly -> {
-                                    // Long press: reset to the default bottom-center spot
-                                    // and swallow the rest of the gesture so no tap
-                                    // leaks to the controls below.
-                                    while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                        event.changes.forEach { it.consume() }
-                                        if (event.changes.none { it.pressed }) break
-                                    }
-                                    subsPlaced = false
-                                    TubeApp.subtitlePlaced = false
-                                }
-                            }
+                            if (drag) persistSubtitlePos()
                         }
                     }
             ) {
@@ -520,7 +469,16 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             detectTapGestures(
                                 onTap = { controlsVisible = !controlsVisible },
                                 onDoubleTap = { offset ->
-                                    if (offset.x < size.width / 2f) {
+                                    // Double-tapping the subtitle restores its
+                                    // default position instead of seeking.
+                                    val onPill = subsSize.width > 0 &&
+                                        offset.x >= renderPos.x &&
+                                        offset.x <= renderPos.x + subsSize.width &&
+                                        offset.y >= renderPos.y &&
+                                        offset.y <= renderPos.y + subsSize.height
+                                    if (onPill) {
+                                        resetSubtitleDefaults()
+                                    } else if (offset.x < size.width / 2f) {
                                         player.seekTo(
                                             (player.currentPosition - 10_000).coerceAtLeast(0))
                                         seekNudge = -1
@@ -536,26 +494,77 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                 // user drags it, the CC button / play button / slider stay on
                 // top and remain tappable (YouTube does the same).
                 if (subsOn && currentIndex >= 0) {
-                    Box(
-                        Modifier
-                            .align(Alignment.TopStart)
-                            .offset {
-                                IntOffset(renderPos.x.roundToInt(), renderPos.y.roundToInt())
+                    // The pill is measured and placed in the SAME layout pass.
+                    // The old offset + onSizeChanged round trip placed each new
+                    // cue using the previous cue's size for one frame, so a cue
+                    // with a different line count visibly jumped on entrance.
+                    Layout(
+                        content = {
+                            // Reset the remembered pill size when the pill leaves
+                            // composition (subs off / no cue) — otherwise the stale
+                            // size keeps the drag hit-test acting on a pill that is
+                            // no longer on screen.
+                            DisposableEffect(Unit) {
+                                onDispose { subsSize = IntSize.Zero }
                             }
-                            .onSizeChanged { subsSize = it }
-                            // NOTE: no pointerInput here — the pill's drag/long-press
-                            // handling lives on the video Box above (Initial pass), so
-                            // it wins over the seek bar / tap surface even when the pill
-                            // sits under the progress bar.
-                    ) {
-                        // Reset the remembered pill size when the pill leaves
-                        // composition (between cues) — otherwise the stale size
-                        // keeps the positioning block and the drag hit-test acting
-                        // on a pill that is no longer on screen.
-                        DisposableEffect(Unit) {
-                            onDispose { subsSize = IntSize.Zero }
+                            SubtitleOverlay(
+                                cue = track.cues()[currentIndex],
+                                maxPillWidthPx = subtitleMaxWidthPx.roundToInt()
+                                    .coerceAtMost(
+                                        videoSize.width.takeIf { it > 0 } ?: Int.MAX_VALUE
+                                    ),
+                                modifier = Modifier
+                                    // Double-tap the pill to restore the default
+                                    // position. The detector must live HERE:
+                                    // Material's Surface is touch-opaque for hit
+                                    // testing, so taps on the pill never reach the
+                                    // full-video tap surface.
+                                    .pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onDoubleTap = { resetSubtitleDefaults() }
+                                        )
+                                    }
+                                // NOTE: no drag handler here — that lives on the
+                                // video Box above (Initial pass), so it wins over
+                                // the seek bar / tap surface even when the pill
+                                // sits under the progress bar.
+                            )
+                        },
+                        modifier = Modifier.matchParentSize()
+                    ) { measurables, constraints ->
+                        val videoWidth = videoSize.width.takeIf { it > 0 }
+                            ?: constraints.maxWidth
+                        val videoHeight = videoSize.height.takeIf { it > 0 }
+                            ?: constraints.maxHeight
+                        val placeable = measurables.first().measure(
+                            Constraints(
+                                maxWidth = subtitleMaxWidthPx.roundToInt()
+                                    .coerceIn(0, videoWidth),
+                                maxHeight = constraints.maxHeight
+                            )
+                        )
+                        val width = placeable.width
+                        val height = placeable.height
+                        // Default: bottom center with a constant inset (never
+                        // depends on controls visibility). User-placed: keep the
+                        // saved center, clamped so the pill stays on the video.
+                        val insetPx = 12.dp.toPx()
+                        val centerY = subsCenterY?.let { it * videoHeight }
+                            ?: (videoHeight - insetPx - height / 2f)
+                        val top = (centerY - height / 2f).coerceIn(
+                            0f,
+                            (videoHeight - height).coerceAtLeast(0).toFloat()
+                        )
+                        val left = (videoWidth - width) / 2f
+                        val x = left.roundToInt()
+                        val y = top.roundToInt()
+                        val size = IntSize(width, height)
+                        if (subsSize != size) subsSize = size
+                        val pos = Offset(x.toFloat(), y.toFloat())
+                        if (renderPos != pos) renderPos = pos
+                        layout(constraints.maxWidth, constraints.maxHeight) {
+                            placeable.place(x, y)
                         }
-                        SubtitleOverlay(cue = track.cues()[currentIndex])
                     }
                 }
                 if (controlsVisible) {
@@ -767,21 +776,53 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
 }
 
 @Composable
-private fun SubtitleOverlay(cue: SubtitleCue) {
+private fun SubtitleOverlay(
+    cue: SubtitleCue,
+    maxPillWidthPx: Int,
+    modifier: Modifier = Modifier
+) {
+    val textStyle = MaterialTheme.typography.bodyLarge.copy(
+        color = Color.White,
+        textAlign = TextAlign.Center
+    )
+    val measurer = rememberTextMeasurer()
+    val horizontalPaddingPx = with(LocalDensity.current) { 10.dp.roundToPx() }
+    val textMaxWidthPx = (maxPillWidthPx - horizontalPaddingPx * 2).coerceAtLeast(1)
+    // Compose wraps greedily, which can leave one word alone on the second
+    // line. Measure first; when the cue needs a second line, replace one
+    // space with an explicit newline at the most balanced word boundary.
+    val displayText = remember(cue.text(), textMaxWidthPx, textStyle, measurer) {
+        val natural = measurer.measure(
+            text = cue.text(),
+            style = textStyle,
+            constraints = Constraints(maxWidth = textMaxWidthPx)
+        )
+        if (natural.lineCount <= 1) {
+            cue.text()
+        } else {
+            val balanced = CueBuilder.balanceLines(cue.text())
+            val balancedLayout = measurer.measure(
+                text = balanced,
+                style = textStyle,
+                constraints = Constraints(maxWidth = textMaxWidthPx)
+            )
+            // On very narrow screens even a balanced split may need a third
+            // line; then keep Compose's normal wrapping.
+            if (balancedLayout.lineCount <= 2) balanced else cue.text()
+        }
+    }
     // The container must WRAP the visible pill exactly: this Box's size is what
     // the drag clamp uses. A full-width/taller container would (a) lock the
     // horizontal drag (clamped to 0) and (b) reserve dead space above the video
     // bottom, so the pill could never be dragged under the progress bar.
-    Box(contentAlignment = Alignment.Center) {
+    Box(modifier, contentAlignment = Alignment.Center) {
         Surface(
             color = Color.Black.copy(alpha = 0.6f),
             shape = RoundedCornerShape(6.dp)
         ) {
             Text(
-                cue.text(),
-                color = Color.White,
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyLarge,
+                displayText,
+                style = textStyle,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }
@@ -899,6 +940,7 @@ private fun SeekBar(
 ) {
     var widthPx by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
+    val accent = MaterialTheme.colorScheme.primary
     val dotPx = with(density) { 10.dp.toPx() }
     val strokePx = with(density) { 2.5.dp.toPx() }
     val fraction = if (durationMs > 0) {
@@ -942,21 +984,21 @@ private fun SeekBar(
             val halfDot = dotPx / 2f
             val dotX = (size.width * fraction).coerceIn(halfDot, size.width - halfDot)
             drawLine(
-                color = Color.Red.copy(alpha = 0.4f),
+                color = accent.copy(alpha = 0.4f),
                 start = Offset(0f, y),
                 end = Offset(size.width, y),
                 strokeWidth = strokePx,
                 cap = StrokeCap.Round
             )
             drawLine(
-                color = Color.Red,
+                color = accent,
                 start = Offset(0f, y),
                 end = Offset(dotX, y),
                 strokeWidth = strokePx,
                 cap = StrokeCap.Round
             )
             drawCircle(
-                color = Color.Red,
+                color = accent,
                 radius = halfDot,
                 center = Offset(dotX, y)
             )

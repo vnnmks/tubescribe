@@ -27,8 +27,10 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Cloud transcription through Groq's OpenAI-compatible Whisper endpoint
- * ({@code whisper-large-v3-turbo}).
+ * Cloud transcription through Groq's OpenAI-compatible Whisper endpoint.
+ * Both hosted models are supported — {@code whisper-large-v3-turbo} and the
+ * larger {@code whisper-large-v3} — through the same request shape and the
+ * same response parsing ({@link GroqModel}).
  *
  * <p>Audio arrives as pre-split {@code .m4a} chunks (see
  * {@link dev.tubescribe.media.AudioChunker}), each below the 25 MB upload
@@ -56,7 +58,6 @@ import java.util.logging.Logger;
 public final class GroqTranscriber {
     private static final Logger LOG = Logger.getLogger(GroqTranscriber.class.getName());
     private static final String ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
-    private static final String MODEL_ID = "whisper-large-v3-turbo";
     private static final MediaType AUDIO_M4A = MediaType.parse("audio/mp4");
 
     private static final long RETRY_BACKOFF_MS = 2_000;
@@ -92,9 +93,11 @@ public final class GroqTranscriber {
 
     private final OkHttpClient client = buildClient();
     private final List<String> keys;
+    private final GroqModel model;
 
-    public GroqTranscriber(final List<String> keys) {
+    public GroqTranscriber(final List<String> keys, final GroqModel model) {
         this.keys = keys;
+        this.model = model;
     }
 
     private static OkHttpClient buildClient() {
@@ -116,8 +119,8 @@ public final class GroqTranscriber {
         if (chunks.isEmpty()) {
             throw new IOException("No audio was prepared for transcription.");
         }
-        LOG.info("Groq cloud transcription with " + keys.size() + " configured key(s), "
-                + chunks.size() + " chunk(s)");
+        LOG.info("Groq cloud transcription (" + model.id() + ") with " + keys.size()
+                + " configured key(s), " + chunks.size() + " chunk(s)");
         final List<SubtitleCue> cues = new ArrayList<>();
         final int total = chunks.size();
         double acceptedEndSec = 0;
@@ -223,7 +226,7 @@ public final class GroqTranscriber {
                 final RequestBody fileBody = RequestBody.create(file.toFile(), AUDIO_M4A);
                 final MultipartBody.Builder form = new MultipartBody.Builder()
                         .setType(MultipartBody.FORM)
-                        .addFormDataPart("model", MODEL_ID)
+                        .addFormDataPart("model", model.id())
                         .addFormDataPart("response_format", "verbose_json")
                         // Word timestamps give each word its real start/end so
                         // cue text is timed by the words it shows; segments

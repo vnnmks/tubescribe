@@ -137,8 +137,9 @@ public class SrtTimingTest {
 
     @Test
     public void noSingleWordCues() throws IOException {
-        // The stranded-word artifact this rewrite removed; every cue must
-        // carry a readable phrase.
+        // This fixture pins the old stranded-word artifact: every cue in this
+        // transcript carries a phrase. The balanced splitter still allows a
+        // genuinely pause-isolated word to stand alone.
         final List<SubtitleCue> cues = loadFixture();
         for (int i = 0; i < cues.size(); i++) {
             assertTrue("one-word cue " + (i + 1) + " at " + cues.get(i).start()
@@ -149,8 +150,8 @@ public class SrtTimingTest {
 
     @Test
     public void cueDurationsStayReadable() throws IOException {
-        // Grouping caps at MAX_CUE_SECONDS (7 s); the strand fold may stretch
-        // a merged cue by FOLD_SLACK_SEC (2 s).
+        // Grouping caps at MAX_CUE_SECONDS (7 s). This fixture predates the
+        // balanced splitter, so it also pins the old 2 s fold slack.
         final List<SubtitleCue> cues = loadFixture();
         for (final SubtitleCue cue : cues) {
             assertTrue("over-long cue " + cue.duration() + " s at " + cue.start(),

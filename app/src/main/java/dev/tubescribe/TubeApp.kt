@@ -67,6 +67,13 @@ object TubeApp {
             prefs.edit().putString("quality", value).apply()
         }
 
+    /** Home screen's Whisper model choice, stored as a [GroqModel] enum name. */
+    var lastWhisperModel: String
+        get() = prefs.getString("whisper_model", "TURBO") ?: "TURBO"
+        set(value) {
+            prefs.edit().putString("whisper_model", value).apply()
+        }
+
     var lastUrl: String
         get() = prefs.getString("url", "") ?: ""
         set(value) {

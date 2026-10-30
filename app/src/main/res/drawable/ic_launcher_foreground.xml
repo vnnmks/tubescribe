@@ -1,11 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Play triangle inside a rounded square, white on the brand red background. -->
+<!--
+  A play triangle built from five sharp white rays that fan out to the tip:
+  video playback made from caption lines. A soft drop shadow and a top-down
+  sheen make the rays read as raised strips. Foreground for the adaptive
+  launcher icon, kept inside the circular safe zone and shifted slightly right
+  so its visual weight sits in the middle of the icon mask.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <group
+        android:translateX="1.5"
+        android:translateY="1.5">
+        <path
+            android:fillColor="#40000000"
+            android:pathData="M41.5,30 L41.5,36 L81.5,54 Z M41.5,40.5 L41.5,46.5 L81.5,54 Z M41.5,51 L41.5,57 L81.5,54 Z M41.5,61.5 L41.5,67.5 L81.5,54 Z M41.5,72 L41.5,78 L81.5,54 Z" />
+    </group>
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M44,36 L44,72 L72,54 Z" />
+        android:pathData="M41.5,30 L41.5,36 L81.5,54 Z M41.5,40.5 L41.5,46.5 L81.5,54 Z M41.5,51 L41.5,57 L81.5,54 Z M41.5,61.5 L41.5,67.5 L81.5,54 Z M41.5,72 L41.5,78 L81.5,54 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="30"
+                android:endX="54"
+                android:endY="78"
+                android:startColor="#FFFFFFFF"
+                android:endColor="#FFE8E8E8" />
+        </aapt:attr>
+    </path>
 </vector>

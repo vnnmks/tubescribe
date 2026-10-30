@@ -13,7 +13,8 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
 
 1. Open the app → **Settings** (gear) → paste your Groq API key
 2. Paste a YouTube link (or share a YouTube link to TubeScribe)
-3. Pick a quality (360p / 720p / 1080p) → **Fetch & transcribe**
+3. Pick a quality (360p / 720p / 1080p) and a subtitle model (Max speed or
+   Max accuracy) → **Fetch & transcribe**
 4. When transcription finishes the player opens automatically — subtitles are
    overlaid on the video, the transcript below is tappable to seek, and the
    current line follows playback
@@ -36,6 +37,22 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
    away: a bin icon grows as you drag, and releasing past the threshold
    removes the entry (its media, subtitles and metadata). Releasing earlier
    slides the row back without deleting anything
+
+## Subtitle models
+
+The home screen's **Subtitles** picker offers two trade-offs:
+
+- **Max speed** (`whisper-large-v3-turbo`) — default: the distilled model,
+  about a third of the price of Max accuracy with a small accuracy
+  trade-off.
+- **Max accuracy** (`whisper-large-v3`) — the full model: more accurate and
+  more expensive. Both run far faster than real time on Groq.
+
+Both take the same requests and have the same free-tier limits (25 MB per
+upload, 20 requests/minute, 8 hours of audio/day). Cached transcripts remember
+which model made them, so switching models re-transcribes a cached video on
+the next fetch while reusing the downloaded video. Settings → **About** shows
+these mappings and the app version.
 
 ## Building
 

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dev.tubescribe.media.Quality
 import dev.tubescribe.net.YouTubeClient
 import dev.tubescribe.transcribe.GroqKeyStore
+import dev.tubescribe.transcribe.GroqModel
 import dev.tubescribe.util.Cancellation
 import dev.tubescribe.util.OperationCancelledException
 import dev.tubescribe.util.ProgressListener
@@ -49,7 +50,7 @@ class TubeViewModel : ViewModel() {
         _incomingUrl.tryEmit(url)
     }
 
-    fun start(rawUrl: String, quality: Quality) {
+    fun start(rawUrl: String, quality: Quality, model: GroqModel) {
         val url = rawUrl.trim()
         if (url.isEmpty() || running) {
             return
@@ -70,7 +71,7 @@ class TubeViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    Pipeline(TubeApp.cacheDir, keys).run(
+                    Pipeline(TubeApp.cacheDir, keys, model).run(
                         url,
                         quality,
                         ProgressListener { fraction, message ->

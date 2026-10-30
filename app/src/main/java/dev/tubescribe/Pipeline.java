@@ -9,6 +9,7 @@ import dev.tubescribe.net.VideoInfo;
 import dev.tubescribe.net.YouTubeClient;
 import dev.tubescribe.net.YouTubeException;
 import dev.tubescribe.subs.SubtitleTrack;
+import dev.tubescribe.transcribe.GroqModel;
 import dev.tubescribe.transcribe.GroqTranscriber;
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.Fmt;
@@ -42,14 +43,19 @@ import java.util.logging.Logger;
  */
 public final class Pipeline {
     private static final Logger LOG = Logger.getLogger(Pipeline.class.getName());
+    /** Records which Whisper model produced {@code subtitles.srt}. */
+    private static final String MODEL_FILE = "transcript.model";
 
     private final File cacheRoot;
     private final List<String> groqKeys;
+    private final GroqModel whisperModel;
     private final MediaDownloader mediaDownloader = new MediaDownloader();
 
-    public Pipeline(final File cacheRoot, final List<String> groqKeys) {
+    public Pipeline(final File cacheRoot, final List<String> groqKeys,
+                    final GroqModel whisperModel) {
         this.cacheRoot = cacheRoot;
         this.groqKeys = groqKeys;
+        this.whisperModel = whisperModel;
     }
 
     public record Result(File mediaFile, File subtitleFile, SubtitleTrack subtitles,
@@ -72,9 +78,15 @@ public final class Pipeline {
         final File media = new File(cacheDir, "video.mp4");
         final File audioSource = new File(cacheDir, "audio-source.m4a");
         final File subtitleFile = new File(cacheDir, "subtitles.srt");
+        final File modelFile = new File(cacheDir, MODEL_FILE);
         final File metaFile = new File(cacheDir, "meta.properties");
 
-        if (valid(media) && subtitleFile.isFile()) {
+        // Cached subtitles remember the model that produced them, so switching
+        // the picker re-transcribes instead of silently serving the old
+        // model's transcript. Entries from builds that predate the choice have
+        // no marker and were all turbo.
+        final boolean sameModel = subtitleModelMatches(modelFile, whisperModel);
+        if (valid(media) && subtitleFile.isFile() && sameModel) {
             final VideoInfo cached = readMeta(id, metaFile);
             VideoInfo served = cached;
             // Re-requesting a cached video at a higher quality upgrades the
@@ -109,7 +121,10 @@ public final class Pipeline {
         }
 
         final boolean needMedia = !valid(media);
-        final boolean needSubs = !subtitleFile.isFile();
+        // A cached transcript from another model is stale: re-run the
+        // transcription (the cached video itself is still reused) and let the
+        // new subtitles atomically replace the old ones on success.
+        final boolean needSubs = !subtitleFile.isFile() || !sameModel;
         if (needMedia) {
             //noinspection ResultOfMethodCallIgnored
             media.delete();
@@ -338,11 +353,13 @@ public final class Pipeline {
                 audioIn, work.cacheDir, map(work.audioProgress, chunkAt, chunkSpan), work.audioCancel);
         try {
             work.audioCancel.throwIfCancelled();
-            work.audioProgress.update(whisperAt, "Transcribing with Groq Whisper…");
+            work.audioProgress.update(whisperAt,
+                    "Transcribing with " + whisperModel.modelName() + "…");
             final SubtitleTrack track = new SubtitleTrack(
-                    new GroqTranscriber(groqKeys).transcribe(chunks,
+                    new GroqTranscriber(groqKeys, whisperModel).transcribe(chunks,
                             map(work.audioProgress, whisperAt, whisperSpan), work.audioCancel));
             writeSubtitleFile(work.subtitleFile, track);
+            writeTranscriptModel(new File(work.cacheDir, MODEL_FILE), whisperModel);
         } finally {
             for (final AudioChunker.Chunk chunk : chunks) {
                 //noinspection ResultOfMethodCallIgnored
@@ -551,6 +568,43 @@ public final class Pipeline {
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** True when the cached subtitles came from {@code model}. A missing
+     * marker means the entry predates the model choice, when only turbo ran. */
+    private static boolean subtitleModelMatches(final File modelFile,
+                                                final GroqModel model) {
+        if (!modelFile.isFile()) {
+            return model == GroqModel.TURBO;
+        }
+        try {
+            final String cached = new String(Files.readAllBytes(modelFile.toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8).strip();
+            return model.id().equals(cached);
+        } catch (final IOException e) {
+            LOG.warning("Cannot read " + modelFile + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Records the model behind the cached subtitles. Marker failures are only
+     * metadata loss — the run stays valid and the next one re-transcribes. */
+    private static void writeTranscriptModel(final File target, final GroqModel model) {
+        final File temp = new File(target.getParentFile(), target.getName() + ".part");
+        try {
+            Files.write(temp.toPath(), (model.id() + "\n")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try {
+                Files.move(temp.toPath(), target.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (final IOException e) {
+            LOG.warning("Cannot write " + target + ": " + e.getMessage());
+            //noinspection ResultOfMethodCallIgnored
+            temp.delete();
         }
     }
 

@@ -20,7 +20,8 @@ import static org.junit.Assert.assertTrue;
  */
 public class GroqTranscriberParseTest {
 
-    private final GroqTranscriber transcriber = new GroqTranscriber(List.of());
+    private final GroqTranscriber transcriber =
+            new GroqTranscriber(List.of(), GroqModel.TURBO);
 
     private List<SubtitleCue> parse(final String body, final double offset,
                                     final double floor, final double acceptedEnd)

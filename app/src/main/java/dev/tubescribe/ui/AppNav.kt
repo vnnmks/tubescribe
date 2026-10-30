@@ -90,8 +90,14 @@ fun AppNav(viewModel: TubeViewModel) {
             SettingsScreen(
                 onBack = { screen = "home" },
                 onOpenKeys = { screen = "keys" },
-                onOpenCache = { screen = "cache" }
+                onOpenCache = { screen = "cache" },
+                onOpenAbout = { screen = "about" }
             )
+        }
+
+        "about" -> {
+            BackHandler { screen = "settings" }
+            AboutScreen(onBack = { screen = "settings" })
         }
 
         "keys" -> {

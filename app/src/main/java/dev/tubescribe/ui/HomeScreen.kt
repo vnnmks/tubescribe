@@ -2,7 +2,6 @@ package dev.tubescribe.ui
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -44,7 +43,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -59,7 +57,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -68,12 +68,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.tubescribe.CacheCleaner
 import dev.tubescribe.Pipeline
 import dev.tubescribe.PipelineState
 import dev.tubescribe.TubeApp
 import dev.tubescribe.TubeViewModel
 import dev.tubescribe.media.Quality
+import dev.tubescribe.transcribe.GroqModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,10 +93,13 @@ fun HomeScreen(
     val clipboard = LocalClipboardManager.current
 
     var qualityName by rememberSaveable { mutableStateOf(TubeApp.lastQuality) }
+    var modelName by rememberSaveable { mutableStateOf(TubeApp.lastWhisperModel) }
     var cached by remember { mutableStateOf<List<Pipeline.RecentVideo>>(emptyList()) }
     var saved by rememberSaveable { mutableStateOf<Set<String>>(TubeApp.savedVideoIds) }
     var showQualityMenu by remember { mutableStateOf(false) }
+    var showModelMenu by remember { mutableStateOf(false) }
     val quality = Quality.fromName(qualityName, Quality.P720)
+    val model = GroqModel.fromName(modelName, GroqModel.TURBO)
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -152,19 +157,15 @@ fun HomeScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("TubeScribe", fontWeight = FontWeight.Bold)
+                        BrandMark(height = 26.dp)
                         Spacer(Modifier.width(10.dp))
-                        Surface(
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text(
-                                "CLOUD · GROQ",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
+                        Text(
+                            "TubeScribe",
+                            fontFamily = LogoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 24.sp,
+                            letterSpacing = (-0.5).sp
+                        )
                     }
                 },
                 actions = {
@@ -204,30 +205,94 @@ fun HomeScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Quality", style = MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.width(8.dp))
-                Box {
-                    TextButton(onClick = { showQualityMenu = true }) {
-                        Text(quality.label())
+            Row(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Video:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Box {
+                        Text(
+                            quality.label(),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { showQualityMenu = true }
+                                .padding(vertical = 8.dp)
+                        )
+                        DropdownMenu(
+                            expanded = showQualityMenu,
+                            onDismissRequest = { showQualityMenu = false }
+                        ) {
+                            Quality.values().forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label()) },
+                                    onClick = {
+                                        qualityName = option.name
+                                        TubeApp.lastQuality = option.name
+                                        showQualityMenu = false
+                                    }
+                                )
+                            }
+                        }
                     }
-                    DropdownMenu(
-                        expanded = showQualityMenu,
-                        onDismissRequest = { showQualityMenu = false }
-                    ) {
-                        Quality.values().forEach { option ->
-                            DropdownMenuItem(
-                                text = { Text(option.label()) },
-                                onClick = {
-                                    qualityName = option.name
-                                    TubeApp.lastQuality = option.name
-                                    showQualityMenu = false
-                                }
-                            )
+                }
+
+                Row(
+                    Modifier.weight(2f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Subtitles:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Box {
+                        Text(
+                            model.label(),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { showModelMenu = true }
+                                .padding(vertical = 8.dp)
+                        )
+                        DropdownMenu(
+                            expanded = showModelMenu,
+                            onDismissRequest = { showModelMenu = false }
+                        ) {
+                            GroqModel.values().forEach { option ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(option.label())
+                                            Text(
+                                                option.modelName(),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        modelName = option.name
+                                        TubeApp.lastWhisperModel = option.name
+                                        showModelMenu = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
+
+            Spacer(Modifier.height(10.dp))
 
             when (val current = state) {
                 is PipelineState.Running -> {
@@ -279,8 +344,14 @@ fun HomeScreen(
 
             val running = state is PipelineState.Running
             Button(
-                onClick = { viewModel.start(url, quality) },
+                onClick = { viewModel.start(url, quality, model) },
                 enabled = !running && url.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = Color(0xFF0E1116),
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp)
@@ -289,7 +360,7 @@ fun HomeScreen(
                     CircularProgressIndicator(
                         Modifier.size(18.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.width(10.dp))
                     Text("Working…")
@@ -310,7 +381,7 @@ fun HomeScreen(
                     // re-fetch and re-transcribe instead of opening a broken player.
                     val height = item.qualityLabel()
                         .filter { c -> c.isDigit() }.toIntOrNull() ?: 720
-                    viewModel.start(item.url(), Quality.fromHeight(height, Quality.P720))
+                    viewModel.start(item.url(), Quality.fromHeight(height, Quality.P720), model)
                 }
             }
 
