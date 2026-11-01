@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
@@ -194,10 +195,16 @@ fun HomeScreen(
                 singleLine = true,
                 enabled = state !is PipelineState.Running,
                 trailingIcon = {
-                    IconButton(onClick = {
-                        clipboard.getText()?.text?.let(viewModel::setUrl)
-                    }) {
-                        Icon(Icons.Default.ContentPaste, contentDescription = "Paste")
+                    if (url.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.setUrl("") }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear")
+                        }
+                    } else {
+                        IconButton(onClick = {
+                            clipboard.getText()?.text?.let(viewModel::setUrl)
+                        }) {
+                            Icon(Icons.Default.ContentPaste, contentDescription = "Paste")
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
