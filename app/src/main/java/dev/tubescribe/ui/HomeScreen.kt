@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -381,11 +382,16 @@ fun HomeScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            val openVideo: (Pipeline.RecentVideo) -> Unit = { item ->
+            // A row opens the transcript of the model picked above when that
+            // model has run on the video, otherwise the newest one it has.
+            val preferredModel: (Pipeline.RecentVideo) -> GroqModel = { item ->
+                if (item.models().contains(model)) model else item.model()
+            }
+            val openVideo: (Pipeline.RecentVideo, GroqModel) -> Unit = { item, chosen ->
                 val media = item.mediaFile()
-                val subs = item.subtitleFile()
+                val subs = item.subtitleFileFor(chosen)
                 if (media.isFile && media.length() >= 1024 && subs.isFile) {
-                    onOpenPlayer(PlayerArgs.from(item))
+                    onOpenPlayer(PlayerArgs.from(item, chosen))
                 } else {
                     // The cache vanished (cleared storage, interrupted run…):
                     // re-fetch and re-transcribe instead of opening a broken player.
@@ -414,7 +420,8 @@ fun HomeScreen(
                             item = item,
                             saved = true,
                             onToggleSave = { toggleSave(item) },
-                            onClick = { openVideo(item) },
+                            onClick = { openVideo(item, preferredModel(item)) },
+                            onOpenModel = { openVideo(item, it) },
                             onDelete = { deleteCached(item) }
                         )
                     }
@@ -445,7 +452,8 @@ fun HomeScreen(
                             item = item,
                             saved = false,
                             onToggleSave = { toggleSave(item) },
-                            onClick = { openVideo(item) },
+                            onClick = { openVideo(item, preferredModel(item)) },
+                            onOpenModel = { openVideo(item, it) },
                             onDelete = { deleteCached(item) }
                         )
                     }
@@ -461,6 +469,7 @@ private fun CachedRow(
     saved: Boolean,
     onToggleSave: () -> Unit,
     onClick: () -> Unit,
+    onOpenModel: (GroqModel) -> Unit,
     onDelete: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -555,6 +564,24 @@ private fun CachedRow(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    // Both models ran on this video: one button per transcript.
+                    if (item.models().size > 1) {
+                        Spacer(Modifier.height(4.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            item.models().forEach { cachedModel ->
+                                OutlinedButton(
+                                    onClick = { onOpenModel(cachedModel) },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(30.dp)
+                                ) {
+                                    Text(
+                                        cachedModel.label(),
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 IconButton(onClick = onToggleSave) {
                     Icon(

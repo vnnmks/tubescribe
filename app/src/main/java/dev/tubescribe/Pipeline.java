@@ -43,7 +43,8 @@ import java.util.logging.Logger;
  */
 public final class Pipeline {
     private static final Logger LOG = Logger.getLogger(Pipeline.class.getName());
-    /** Records which Whisper model produced {@code subtitles.srt}. */
+    /** Layout before 0.4.2: one transcript plus a marker naming its model. */
+    private static final String LEGACY_SUBTITLES = "subtitles.srt";
     private static final String MODEL_FILE = "transcript.model";
 
     private final File cacheRoot;
@@ -59,7 +60,7 @@ public final class Pipeline {
     }
 
     public record Result(File mediaFile, File subtitleFile, SubtitleTrack subtitles,
-                         VideoInfo video, boolean fromCache) {
+                         VideoInfo video, boolean fromCache, GroqModel model) {
     }
 
     public Result run(final String input, final Quality quality,
@@ -77,16 +78,13 @@ public final class Pipeline {
         cacheDir.mkdirs();
         final File media = new File(cacheDir, "video.mp4");
         final File audioSource = new File(cacheDir, "audio-source.m4a");
-        final File subtitleFile = new File(cacheDir, "subtitles.srt");
-        final File modelFile = new File(cacheDir, MODEL_FILE);
+        migrateLegacySubtitles(cacheDir);
+        final File subtitleFile = subtitleFileFor(cacheDir, whisperModel);
         final File metaFile = new File(cacheDir, "meta.properties");
 
-        // Cached subtitles remember the model that produced them, so switching
-        // the picker re-transcribes instead of silently serving the old
-        // model's transcript. Entries from builds that predate the choice have
-        // no marker and were all turbo.
-        final boolean sameModel = subtitleModelMatches(modelFile, whisperModel);
-        if (valid(media) && subtitleFile.isFile() && sameModel) {
+        // Every model keeps its own transcript, so switching the picker only
+        // re-transcribes when that model has not run on this video yet.
+        if (valid(media) && subtitleFile.isFile()) {
             final VideoInfo cached = readMeta(id, metaFile);
             VideoInfo served = cached;
             // Re-requesting a cached video at a higher quality upgrades the
@@ -110,21 +108,20 @@ public final class Pipeline {
                     ? "no speech detected" : (track.size() + " subtitle cues");
             if (upgraded) {
                 listener.update(1.0, "Upgraded · " + qualityNote(served) + " · " + subtitleSummary);
-                return new Result(media, subtitleFile, track, served, false);
+                return new Result(media, subtitleFile, track, served, false, whisperModel);
             }
             if (note != null) {
                 listener.update(1.0, note + " · " + subtitleSummary);
             } else {
                 listener.update(1.0, "Loaded video and subtitles from cache");
             }
-            return new Result(media, subtitleFile, track, served, true);
+            return new Result(media, subtitleFile, track, served, true, whisperModel);
         }
 
         final boolean needMedia = !valid(media);
-        // A cached transcript from another model is stale: re-run the
-        // transcription (the cached video itself is still reused) and let the
-        // new subtitles atomically replace the old ones on success.
-        final boolean needSubs = !subtitleFile.isFile() || !sameModel;
+        // A video cached with another model only needs this model's transcript
+        // (the cached video itself is reused).
+        final boolean needSubs = !subtitleFile.isFile();
         if (needMedia) {
             //noinspection ResultOfMethodCallIgnored
             media.delete();
@@ -217,7 +214,7 @@ public final class Pipeline {
         listener.update(1.0, qualityNote.isEmpty()
                 ? (track.isEmpty() ? "Media ready · no speech detected" : "Ready · " + subtitleSummary)
                 : "Ready · " + qualityNote + " · " + subtitleSummary);
-        return new Result(media, subtitleFile, track, info, false);
+        return new Result(media, subtitleFile, track, info, false, whisperModel);
     }
 
     /** One run's shared state for the two parallel halves. */
@@ -359,7 +356,6 @@ public final class Pipeline {
                     new GroqTranscriber(groqKeys, whisperModel).transcribe(chunks,
                             map(work.audioProgress, whisperAt, whisperSpan), work.audioCancel));
             writeSubtitleFile(work.subtitleFile, track);
-            writeTranscriptModel(new File(work.cacheDir, MODEL_FILE), whisperModel);
         } finally {
             for (final AudioChunker.Chunk chunk : chunks) {
                 //noinspection ResultOfMethodCallIgnored
@@ -571,40 +567,41 @@ public final class Pipeline {
         }
     }
 
-    /** True when the cached subtitles came from {@code model}. A missing
-     * marker means the entry predates the model choice, when only turbo ran. */
-    private static boolean subtitleModelMatches(final File modelFile,
-                                                final GroqModel model) {
-        if (!modelFile.isFile()) {
-            return model == GroqModel.TURBO;
-        }
-        try {
-            final String cached = new String(Files.readAllBytes(modelFile.toPath()),
-                    java.nio.charset.StandardCharsets.UTF_8).strip();
-            return model.id().equals(cached);
-        } catch (final IOException e) {
-            LOG.warning("Cannot read " + modelFile + ": " + e.getMessage());
-            return false;
-        }
+    /** The transcript a given model produced for a cached video. */
+    private static File subtitleFileFor(final File cacheDir, final GroqModel model) {
+        return new File(cacheDir, "subtitles-" + model.name().toLowerCase(java.util.Locale.ROOT) + ".srt");
     }
 
-    /** Records the model behind the cached subtitles. Marker failures are only
-     * metadata loss — the run stays valid and the next one re-transcribes. */
-    private static void writeTranscriptModel(final File target, final GroqModel model) {
-        final File temp = new File(target.getParentFile(), target.getName() + ".part");
+    /**
+     * Moves a pre-0.4.2 entry (one {@code subtitles.srt} plus a model marker,
+     * or no marker when only turbo existed) to the per-model file name.
+     */
+    private static synchronized void migrateLegacySubtitles(final File cacheDir) {
+        final File legacy = new File(cacheDir, LEGACY_SUBTITLES);
+        if (!legacy.isFile()) {
+            return;
+        }
+        final File marker = new File(cacheDir, MODEL_FILE);
+        GroqModel model = GroqModel.TURBO;
         try {
-            Files.write(temp.toPath(), (model.id() + "\n")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            try {
-                Files.move(temp.toPath(), target.toPath(),
-                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            if (marker.isFile()) {
+                model = GroqModel.fromId(new String(Files.readAllBytes(marker.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8).strip());
             }
-        } catch (final IOException e) {
-            LOG.warning("Cannot write " + target + ": " + e.getMessage());
+            if (model == null) {
+                return;
+            }
+            final File target = subtitleFileFor(cacheDir, model);
+            if (target.isFile()) {
+                //noinspection ResultOfMethodCallIgnored
+                legacy.delete();
+            } else {
+                Files.move(legacy.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
             //noinspection ResultOfMethodCallIgnored
-            temp.delete();
+            marker.delete();
+        } catch (final IOException e) {
+            LOG.warning("Cannot migrate " + legacy + ": " + e.getMessage());
         }
     }
 
@@ -857,15 +854,32 @@ public final class Pipeline {
             return result;
         }
         for (final File dir : dirs) {
+            migrateLegacySubtitles(dir);
             final File media = new File(dir, "video.mp4");
-            final File subs = new File(dir, "subtitles.srt");
-            if (!valid(media) || !subs.isFile()) {
+            if (!valid(media)) {
+                continue;
+            }
+            final List<GroqModel> models = new ArrayList<>();
+            File subs = null;
+            GroqModel newestModel = null;
+            for (final GroqModel candidate : GroqModel.values()) {
+                final File file = subtitleFileFor(dir, candidate);
+                if (!file.isFile()) {
+                    continue;
+                }
+                models.add(candidate);
+                if (subs == null || file.lastModified() > subs.lastModified()) {
+                    subs = file;
+                    newestModel = candidate;
+                }
+            }
+            if (subs == null) {
                 continue;
             }
             final VideoInfo info = readMeta(dir.getName(), new File(dir, "meta.properties"));
             result.add(new RecentVideo(info.id(), info.title(), info.uploader(),
                     info.qualityLabel(), info.durationSeconds(), info.canonicalUrl(),
-                    media, subs, subs.lastModified()));
+                    media, subs, subs.lastModified(), newestModel, models));
         }
         result.sort(Comparator.comparingLong(RecentVideo::modified).reversed());
         return result;
@@ -877,10 +891,17 @@ public final class Pipeline {
 
     public record RecentVideo(String id, String title, String uploader, String qualityLabel,
                               long durationSeconds, String url, File mediaFile, File subtitleFile,
-                              long modified) {        public String metaLine() {
+                              long modified, GroqModel model, List<GroqModel> models) {
+        /** The transcript the given cached model produced for this video. */
+        public File subtitleFileFor(final GroqModel which) {
+            return Pipeline.subtitleFileFor(mediaFile.getParentFile(), which);
+        }
+
+        public String metaLine() {
             return qualityLabel + " · " + Fmt.time(durationSeconds) + " · "
                     + (modified > 0 ? new java.text.SimpleDateFormat("MMM d",
-                    java.util.Locale.getDefault()).format(new java.util.Date(modified)) : "");
+                    java.util.Locale.getDefault()).format(new java.util.Date(modified)) : "")
+                    + (models.size() == 1 ? " · " + model.label() : "");
         }
     }
 }

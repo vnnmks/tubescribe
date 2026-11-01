@@ -50,10 +50,13 @@ The home screen's **Subtitles** picker offers two trade-offs:
   more expensive. Both run far faster than real time on Groq.
 
 Both take the same requests and have the same free-tier limits (25 MB per
-upload, 20 requests/minute, 8 hours of audio/day). Cached transcripts remember
-which model made them, so switching models re-transcribes a cached video on
-the next fetch while reusing the downloaded video. Settings → **About** shows
-these mappings and the app version.
+upload, 20 requests/minute, 8 hours of audio/day). Each cached video keeps one
+transcript per model, so switching models only transcribes again when that
+model has not run on the video yet, reusing the downloaded video. The Cached
+list shows which model made a transcript; when both exist, **Max speed** and
+**Max accuracy** buttons under the row open either one, and the player header
+names the model of the transcript it shows. Settings → **About** shows these
+mappings and the app version.
 
 ## Updates
 

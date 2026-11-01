@@ -307,10 +307,11 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        if (args.uploader.isNotBlank()) {
+                        val details = listOf(args.uploader, args.qualityLabel, args.modelLabel)
+                            .filter { it.isNotBlank() }
+                        if (details.isNotEmpty()) {
                             Text(
-                                args.uploader + (if (args.qualityLabel.isNotBlank())
-                                    " · " + args.qualityLabel else ""),
+                                details.joinToString(" · "),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

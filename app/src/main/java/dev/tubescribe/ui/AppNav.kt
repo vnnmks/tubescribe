@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import dev.tubescribe.Pipeline
 import dev.tubescribe.TubeViewModel
 import dev.tubescribe.net.VideoInfo
+import dev.tubescribe.transcribe.GroqModel
 import java.io.File
 
 /**
@@ -23,7 +24,8 @@ data class PlayerArgs(
     val title: String,
     val uploader: String,
     val qualityLabel: String,
-    val qualityNote: String = ""
+    val qualityNote: String = "",
+    val modelLabel: String = ""
 ) {
     companion object {
         fun from(result: Pipeline.Result): PlayerArgs {
@@ -35,17 +37,22 @@ data class PlayerArgs(
                 title = info.title(),
                 uploader = info.uploader(),
                 qualityLabel = info.qualityLabel(),
-                qualityNote = availabilityNote(info)
+                qualityNote = availabilityNote(info),
+                modelLabel = result.model().label()
             )
         }
 
-        fun from(recent: Pipeline.RecentVideo): PlayerArgs = PlayerArgs(
+        fun from(
+            recent: Pipeline.RecentVideo,
+            model: GroqModel = recent.model()
+        ): PlayerArgs = PlayerArgs(
             mediaPath = recent.mediaFile().absolutePath,
-            subsPath = recent.subtitleFile().absolutePath,
+            subsPath = recent.subtitleFileFor(model).absolutePath,
             videoId = recent.id(),
             title = recent.title(),
             uploader = recent.uploader() ?: "",
-            qualityLabel = recent.qualityLabel()
+            qualityLabel = recent.qualityLabel(),
+            modelLabel = model.label()
         )
     }
 }

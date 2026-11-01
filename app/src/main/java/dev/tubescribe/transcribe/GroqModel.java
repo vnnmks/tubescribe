@@ -59,6 +59,16 @@ public enum GroqModel {
         return fallback;
     }
 
+    /** Maps a model id such as {@code whisper-large-v3} to a model, or null. */
+    public static GroqModel fromId(final String id) {
+        for (final GroqModel model : values()) {
+            if (model.id.equals(id)) {
+                return model;
+            }
+        }
+        return null;
+    }
+
     @Override
     public String toString() {
         return label;
