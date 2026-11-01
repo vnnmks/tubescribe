@@ -29,10 +29,11 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
    limit), plus a combined rule — delete when either limit is hit (default)
    or when both are. Applied at app start and after each new download.
    The screen also shows the disk space the cache occupies at that moment
-7. Star a video in the home screen's **Cached** list to pin it: saved videos
-   are exempt from every limit and don't count toward them. Un-starring puts
-   the video back on top of Cached with a fresh age, after which the limits
-   apply to it again. The Cached list always mirrors what is on disk
+7. Star a video in the home screen's **Cached** list to pin it: it moves out
+   of Cached into the **Saved** section, where it is exempt from every limit
+   and doesn't count toward them. Un-starring puts the video back on top of
+   Cached with a fresh age, after which the limits apply to it again. Cached
+   and Saved together mirror what is on disk
 8. Swipe a cached row to the **right** to delete that video from disk right
    away: a bin icon grows as you drag, and releasing past the threshold
    removes the entry (its media, subtitles and metadata). Releasing earlier

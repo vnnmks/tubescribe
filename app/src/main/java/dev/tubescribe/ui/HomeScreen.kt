@@ -196,7 +196,10 @@ fun HomeScreen(
                 enabled = state !is PipelineState.Running,
                 trailingIcon = {
                     if (url.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.setUrl("") }) {
+                        IconButton(onClick = {
+                            viewModel.setUrl("")
+                            TubeApp.lastUrl = ""
+                        }) {
                             Icon(Icons.Default.Close, contentDescription = "Clear")
                         }
                     } else {
@@ -393,6 +396,7 @@ fun HomeScreen(
             }
 
             val savedItems = cached.filter { saved.contains(it.id()) }
+            val cachedItems = cached.filterNot { saved.contains(it.id()) }
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -424,7 +428,7 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (cached.isEmpty()) {
+                if (cachedItems.isEmpty()) {
                     item {
                         Text(
                             "Videos you transcribe will show up here — the video " +
@@ -436,10 +440,10 @@ fun HomeScreen(
                         )
                     }
                 } else {
-                    items(cached, key = { "cached:" + it.id() }) { item ->
+                    items(cachedItems, key = { "cached:" + it.id() }) { item ->
                         CachedRow(
                             item = item,
-                            saved = saved.contains(item.id()),
+                            saved = false,
                             onToggleSave = { toggleSave(item) },
                             onClick = { openVideo(item) },
                             onDelete = { deleteCached(item) }

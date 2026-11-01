@@ -33,6 +33,12 @@
                 <data android:scheme="https" android:host="*.youtube.com" />
                 <data android:scheme="https" android:host="youtu.be" />
             </intent-filter>
+            <!-- Appear in the Share sheet (e.g. YouTube -> Share) for text links. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
 
         <provider

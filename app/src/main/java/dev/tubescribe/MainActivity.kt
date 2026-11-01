@@ -19,7 +19,9 @@ class MainActivity : ComponentActivity() {
         TubeApp.init(this)
         // Settings → Caching videos: prune the cache once at process start.
         Thread { runCatching { CacheCleaner.clean(TubeApp.cacheDir) } }.start()
-        handleIntent(intent)
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
         setContent {
             TubeTheme {
                 AppNav(viewModel)
@@ -33,8 +35,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_VIEW) {
-            intent.dataString?.let(viewModel::submitUrl)
+        val url = when (intent?.action) {
+            Intent.ACTION_VIEW -> intent.dataString
+            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)?.let(::extractLink)
+            else -> null
         }
+        url?.let(viewModel::submitUrl)
     }
+
+    // Shared text can be "Title https://youtu.be/..."; keep just the link.
+    private fun extractLink(text: String): String =
+        Regex("https?://\\S+").find(text)?.value ?: text.trim()
 }

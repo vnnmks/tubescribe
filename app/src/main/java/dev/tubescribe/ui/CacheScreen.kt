@@ -131,7 +131,7 @@ fun CacheScreen(onBack: () -> Unit) {
                     "are deleted when they get too old, when there are more of " +
                     "them than the count allows, or once both — checked at app " +
                     "start and after each new transcription.\n\nVideos starred " +
-                    "in the Cached list are stored permanently and never count " +
+                    "in the Cached list move to Saved, are stored permanently and never count " +
                     "against the limits. Un-starring puts them back on top of " +
                     "the cache with a fresh age.",
                 style = MaterialTheme.typography.bodySmall,

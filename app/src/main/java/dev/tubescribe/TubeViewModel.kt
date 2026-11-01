@@ -47,6 +47,9 @@ class TubeViewModel : ViewModel() {
         get() = _state.value is PipelineState.Running
 
     fun submitUrl(url: String) {
+        // Set directly so a cold start keeps the link (the flow has no replay);
+        // the emit only tells AppNav to switch back to the home screen.
+        _url.value = url
         _incomingUrl.tryEmit(url)
     }
 
