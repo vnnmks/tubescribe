@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Status-bar / media-card small icon: the same five fanned play rays as
+  ic_brand_mark, as a flat white shape (Android only uses the alpha channel
+  of notification small icons). Keep the geometry in sync with ic_brand_mark.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,0 L4,6 L44,24 Z M4,10.5 L4,16.5 L44,24 Z M4,21 L4,27 L44,24 Z M4,31.5 L4,37.5 L44,24 Z M4,42 L4,48 L44,24 Z" />
+</vector>

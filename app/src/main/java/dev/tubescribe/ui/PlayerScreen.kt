@@ -1,20 +1,25 @@
 package dev.tubescribe.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.database.ContentObserver
-import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -62,6 +67,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,14 +98,14 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import dev.tubescribe.PlaybackHolder
 import dev.tubescribe.TubeApp
 import dev.tubescribe.subs.CueBuilder
 import dev.tubescribe.subs.SubtitleCue
@@ -116,6 +122,15 @@ import kotlin.math.roundToInt
 // width on purpose, so entering fullscreen never changes the subtitle's size.
 private const val VIDEO_ASPECT_RATIO = 16f / 9f
 private val WINDOWED_VIDEO_HEIGHT = 240.dp
+
+/** How the transcript list tracks the playing subtitle; tapping the label cycles through these. */
+private enum class FollowMode(val label: String) {
+    OFF("Not following"),
+    FOLLOW("Following"),
+    IN_PLACE("Following in place");
+
+    fun next(): FollowMode = entries[(ordinal + 1) % entries.size]
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -136,17 +151,27 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     // on devices that still recreate despite configChanges).
     var restorePositionMs by rememberSaveable { mutableLongStateOf(0L) }
 
+    // The player lives in PlaybackHolder so its MediaSession (notification shade
+    // and lock screen controls) keeps working while the app is in the background.
     val player = remember {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(Uri.fromFile(File(args.mediaPath))))
-            playWhenReady = true
-            prepare()
-            if (restorePositionMs > 0L) seekTo(restorePositionMs)
+        PlaybackHolder.start(
+            context, args.mediaPath, args.title, args.uploader, restorePositionMs
+        )
+    }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
     DisposableEffect(Unit) {
         onDispose {
-            player.release()
+            PlaybackHolder.stop(context)
             // Never leave the rest of the app locked in the player's
             // fullscreen orientation or with hidden system bars.
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -238,7 +263,10 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val currentIndex = track.indexAt(positionSec)
 
     var subsOn by rememberSaveable { mutableStateOf(true) }
-    var autoFollow by remember { mutableStateOf(true) }
+    var followMode by remember { mutableStateOf(FollowMode.FOLLOW) }
+    // The subtitle that was current before the latest change; its on-screen
+    // position is what IN_PLACE mode hands over to the new current subtitle.
+    var previousIndex by remember { mutableIntStateOf(-1) }
     var showMenu by remember { mutableStateOf(false) }
     var seeking by remember { mutableStateOf(false) }
     var seekTargetMs by remember { mutableLongStateOf(0L) }
@@ -289,9 +317,30 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(currentIndex, autoFollow) {
-        if (autoFollow && currentIndex >= 0) {
-            listState.animateScrollToItem(currentIndex)
+    LaunchedEffect(currentIndex, followMode) {
+        if (currentIndex < 0) return@LaunchedEffect
+        val previous = previousIndex
+        previousIndex = currentIndex
+        when (followMode) {
+            FollowMode.OFF -> Unit
+            FollowMode.FOLLOW -> listState.animateScrollToItem(currentIndex)
+            FollowMode.IN_PLACE -> {
+                if (previous == currentIndex) return@LaunchedEffect
+                val visible = listState.layoutInfo.visibleItemsInfo
+                val previousItem = visible.firstOrNull { it.index == previous }
+                if (previousItem == null) {
+                    // The old subtitle is completely off-screen: jump to the top.
+                    listState.animateScrollToItem(currentIndex)
+                } else {
+                    // Put the new subtitle exactly where the old one was.
+                    val currentItem = visible.firstOrNull { it.index == currentIndex }
+                    if (currentItem != null) {
+                        listState.animateScrollBy((currentItem.offset - previousItem.offset).toFloat())
+                    } else {
+                        listState.animateScrollToItem(currentIndex, -previousItem.offset)
+                    }
+                }
+            }
         }
     }
 
@@ -730,12 +779,15 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        if (autoFollow) "Following ▾" else "Follow ▾",
+                        followMode.label + " ▾",
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (autoFollow) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = when (followMode) {
+                            FollowMode.OFF -> MaterialTheme.colorScheme.onSurfaceVariant
+                            FollowMode.FOLLOW -> MaterialTheme.colorScheme.primary
+                            FollowMode.IN_PLACE -> Color.White
+                        },
                         modifier = Modifier
-                            .clickable { autoFollow = !autoFollow }
+                            .clickable { followMode = followMode.next() }
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
@@ -764,7 +816,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 cue = cue,
                                 active = index == currentIndex,
                                 onClick = {
-                                    autoFollow = false
+                                    followMode = FollowMode.OFF
                                     player.seekTo((cue.start() * 1000).toLong())
                                 }
                             )

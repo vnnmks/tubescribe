@@ -38,6 +38,14 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
    away: a bin icon grows as you drag, and releasing past the threshold
    removes the entry (its media, subtitles and metadata). Releasing earlier
    slides the row back without deleting anything
+9. While a video plays, a media card with play/pause and a seek bar appears in
+   the notification shade and on the lock screen, so playback can be
+   controlled without opening the app. On Android 13+ the player asks for the
+   notification permission the first time
+10. Tap the label above the transcript to cycle **Not following**,
+    **Following** (the current line jumps to the top) and **Following in
+    place** (the current line stays wherever you scrolled it to; it only jumps
+    to the top once it has scrolled completely out of view)
 
 ## Subtitle models
 
