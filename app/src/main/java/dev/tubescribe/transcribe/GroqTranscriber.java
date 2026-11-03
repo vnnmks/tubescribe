@@ -4,6 +4,7 @@ import com.grack.nanojson.JsonArray;
 import com.grack.nanojson.JsonObject;
 import com.grack.nanojson.JsonParser;
 import dev.tubescribe.TubeApp;
+import dev.tubescribe.media.AudioChunker;
 import dev.tubescribe.subs.SubtitleCue;
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.Fmt;
@@ -35,7 +36,9 @@ import java.util.logging.Logger;
  * <p>Audio arrives as pre-split {@code .m4a} chunks (see
  * {@link dev.tubescribe.media.AudioChunker}), each below the 25 MB upload
  * limit, and chunks are sequential: chunk {@code i+1}'s file starts exactly
- * where chunk {@code i}'s file ends, with no special head. The accepted tail
+ * where chunk {@code i}'s file ends, with no special head. Later chunks may
+ * still be muxing while earlier ones upload; the {@link AudioChunker.ChunkSource}
+ * blocks until the next one is ready. The accepted tail
  * text rides along as the Whisper {@code prompt}, so a chunk's conditioning
  * text ends precisely where its audio begins: the model transcribes a
  * continuation, not a replay. (Earlier builds kept a rewound head that
@@ -109,56 +112,64 @@ public final class GroqTranscriber {
                 .build();
     }
 
-    public List<SubtitleCue> transcribe(final List<dev.tubescribe.media.AudioChunker.Chunk> chunks,
+    public List<SubtitleCue> transcribe(final AudioChunker.ChunkSource chunks,
                                         final ProgressListener listener,
                                         final Cancellation cancel) throws IOException {
         if (keys.isEmpty()) {
             throw new IOException("No Groq API keys configured. Add at least one key "
                     + "in Settings → Groq API keys.");
         }
-        if (chunks.isEmpty()) {
-            throw new IOException("No audio was prepared for transcription.");
-        }
         LOG.info("Groq cloud transcription (" + model.id() + ") with " + keys.size()
-                + " configured key(s), " + chunks.size() + " chunk(s)");
+                + " configured key(s), streaming chunks");
         final List<SubtitleCue> cues = new ArrayList<>();
-        final int total = chunks.size();
         double acceptedEndSec = 0;
         String prompt = null;
         final boolean verbose = debugLoggingEnabled();
-        for (int i = 0; i < total; i++) {
+        int total = chunks.knownTotal();
+        int index = 0;
+        while (true) {
             cancel.throwIfCancelled();
-            final dev.tubescribe.media.AudioChunker.Chunk chunk = chunks.get(i);
+            final AudioChunker.Chunk chunk = chunks.next();
+            if (chunk == null) {
+                break;
+            }
+            // The splitter may have finished while this chunk was uploading.
+            total = Math.max(total, chunks.knownTotal());
+            final double totalDurationSec = chunks.sourceDurationSec();
             final double offset = chunk.startUs() / 1_000_000.0;
             final double chunkEnd = (chunk.startUs() + chunk.durationUs()) / 1_000_000.0;
-            listener.update(i / (double) total,
-                    "Groq chunk " + (i + 1) + "/" + total + " · uploading "
-                            + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
+            final String label = chunkLabel(index, total);
+            listener.update(chunkProgress(index, total, offset, chunkEnd, totalDurationSec, 0.0),
+                    label + " · uploading " + Fmt.time(offset) + "–" + Fmt.time(chunkEnd));
             if (verbose) {
-                LOG.info("Groq chunk " + (i + 1) + "/" + total + ": container "
-                        + Fmt.time(offset) + "–" + Fmt.time(chunkEnd)
+                LOG.info(label + ": container " + Fmt.time(offset) + "–" + Fmt.time(chunkEnd)
                         + " (duration " + Fmt.time(chunk.durationUs() / 1_000_000.0)
                         + "), prompt=" + (prompt == null ? "none" : prompt.length() + " chars"));
             }
             final String body = uploadChunk(chunk.file().toPath(), offset, chunkEnd,
-                    prompt, keys, listener, i, total, cancel);
+                    prompt, keys, listener, label,
+                    chunkProgress(index, total, offset, chunkEnd, totalDurationSec, 0.45),
+                    cancel);
             // Cue ownership with sequential chunks: a chunk owns its whole
             // file outright — the file starts where the previous one ends, so
             // the partition IS the chunk sequence. The floor (the chunk's own
             // file start) only guards residual timing jitter, e.g. a segment
             // returned at −0.02 relative to the file; a floor-dropped tail
             // that runs past the floor bridges in (see parseCues).
-            final double startFloorSec = i == 0 ? Double.NEGATIVE_INFINITY : offset;
+            final double startFloorSec = index == 0 ? Double.NEGATIVE_INFINITY : offset;
             acceptedEndSec = parseCues(body, offset, startFloorSec, chunkEnd,
-                    cues, acceptedEndSec, verbose, (i + 1) + "/" + total);
+                    cues, acceptedEndSec, verbose, chunkTag(index, total));
             prompt = promptTail(cues);
-            listener.update((i + 1) / (double) total,
-                    "Groq chunk " + (i + 1) + "/" + total + " · transcribed ("
-                            + cues.size() + " cues so far)");
+            listener.update(chunkProgress(index, total, offset, chunkEnd, totalDurationSec, 1.0),
+                    label + " · transcribed (" + cues.size() + " cues so far)");
+            index++;
+        }
+        if (index == 0) {
+            throw new IOException("No audio was prepared for transcription.");
         }
 
         listener.update(1.0, "Transcription complete");
-        LOG.info("Groq returned " + cues.size() + " segment cue(s) from " + total
+        LOG.info("Groq returned " + cues.size() + " segment cue(s) from " + index
                 + " audio chunk(s)");
         cues.sort(SubtitleCue.byStart());
         // Whisper's word timestamps can jitter: a word's end sometimes sits
@@ -173,6 +184,38 @@ public final class GroqTranscriber {
             }
         }
         return cues;
+    }
+
+    /** Label for progress and log lines; the total is unknown while splitting. */
+    private static String chunkLabel(final int index, final int total) {
+        return total > 0 ? "Groq chunk " + (index + 1) + "/" + total
+                : "Groq chunk " + (index + 1);
+    }
+
+    /** Compact chunk position for the verbose parser log. */
+    private static String chunkTag(final int index, final int total) {
+        return total > 0 ? (index + 1) + "/" + total : String.valueOf(index + 1);
+    }
+
+    /**
+     * Progress across the source timeline, measured a given fraction into the
+     * current chunk. Falls back to chunk counts while the splitter has not yet
+     * discovered the total or the source duration is unknown.
+     */
+    private static double chunkProgress(final int index, final int total,
+                                        final double startSec, final double endSec,
+                                        final double totalDurationSec,
+                                        final double within) {
+        final double part = Math.max(0.0, Math.min(1.0, within));
+        if (totalDurationSec > 0) {
+            final double at = startSec + Math.max(0.0, endSec - startSec) * part;
+            return Math.max(0.0, Math.min(1.0, at / totalDurationSec));
+        }
+        if (total > 0) {
+            return Math.max(0.0, Math.min(1.0, (index + part) / total));
+        }
+        // Neither total known yet: creep towards 1 without ever passing it.
+        return Math.max(0.0, Math.min(0.99, (index + part) / (index + 1)));
     }
 
     /**
@@ -208,8 +251,8 @@ public final class GroqTranscriber {
 
     private String uploadChunk(final Path file, final double startSec, final double endSec,
                                final String prompt, final List<String> keys,
-                               final ProgressListener listener,
-                               final int chunk, final int total,
+                               final ProgressListener listener, final String label,
+                               final double transcribingFraction,
                                final Cancellation cancel) throws IOException {
         final Set<Integer> dead = new HashSet<>();
         IOException lastError = null;
@@ -244,8 +287,8 @@ public final class GroqTranscriber {
                         .header("Accept", "application/json")
                         .post(form.build())
                         .build();
-                listener.update((chunk + 0.45) / total,
-                        "Groq chunk " + (chunk + 1) + "/" + total + " · transcribing via " + masked);
+                listener.update(transcribingFraction,
+                        label + " · transcribing via " + masked);
                 final okhttp3.Call call = client.newCall(request);
                 // Cancelling the run aborts this upload instead of waiting for
                 // Groq to answer — checked between chunks otherwise.
@@ -254,8 +297,7 @@ public final class GroqTranscriber {
                     cancel.throwIfCancelled();
                     final String body = response.body() == null ? "" : response.body().string();
                     if (response.isSuccessful()) {
-                        LOG.info("Groq chunk " + (chunk + 1) + "/" + total + " ("
-                                + Fmt.time(startSec) + "–" + Fmt.time(endSec)
+                        LOG.info(label + " (" + Fmt.time(startSec) + "–" + Fmt.time(endSec)
                                 + ") succeeded via " + masked);
                         return body;
                     }

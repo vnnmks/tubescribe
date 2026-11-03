@@ -8,6 +8,7 @@ import android.media.MediaMuxer;
 import dev.tubescribe.TubeApp;
 import dev.tubescribe.util.Cancellation;
 import dev.tubescribe.util.Fmt;
+import dev.tubescribe.util.OperationCancelledException;
 import dev.tubescribe.util.ProgressListener;
 
 import java.io.File;
@@ -37,6 +38,11 @@ import java.util.logging.Logger;
  * transcript as the next request's Whisper {@code prompt}, not from repeating
  * audio in both files. Cue ownership is a plain partition by file boundaries
  * in {@code GroqTranscriber}; unmatched jitter is handled there too.</p>
+ *
+ * <p>Callers that want the first upload to overlap the remaining muxing can
+ * use the {@link #split(File, File, ProgressListener, Cancellation,
+ * ChunkConsumer)} overload, which hands over each chunk as soon as its file
+ * is complete.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
@@ -61,8 +67,56 @@ public final class AudioChunker {
     public record Chunk(File file, long startUs, long durationUs, boolean temporary) {
     }
 
+    /**
+     * Receives each chunk the moment its file is complete. Called on the
+     * splitting thread, so a consumer may block while it uploads the chunk.
+     */
+    @FunctionalInterface
+    public interface ChunkConsumer {
+        void accept(Chunk chunk) throws IOException;
+    }
+
+    /**
+     * Supplies chunks in order. Used by the transcriber so it can start
+     * uploading the first chunk while the remaining ones are still being
+     * written.
+     */
+    public interface ChunkSource {
+        /**
+         * Blocks until the next chunk is complete.
+         *
+         * @return the next chunk, or {@code null} when the audio is exhausted
+         */
+        Chunk next() throws IOException;
+
+        /** Total number of chunks, or 0 while the split is still running. */
+        default int knownTotal() {
+            return 0;
+        }
+
+        /** Duration of the source audio in seconds, or 0 when unknown. */
+        default double sourceDurationSec() {
+            return 0;
+        }
+    }
+
     public static List<Chunk> split(final File media, final File cacheDir,
                                     final ProgressListener listener, final Cancellation cancel)
+            throws IOException {
+        return split(media, cacheDir, listener, cancel, chunk -> {
+        });
+    }
+
+    /**
+     * Same as {@link #split(File, File, ProgressListener, Cancellation)}, but
+     * passes every chunk to {@code onChunk} as soon as its file is complete.
+     * That lets a caller on another thread upload the first chunk while later
+     * chunks are still being muxed. The returned list holds every chunk for
+     * cleanup and is complete only once this method returns.
+     */
+    public static List<Chunk> split(final File media, final File cacheDir,
+                                    final ProgressListener listener, final Cancellation cancel,
+                                    final ChunkConsumer onChunk)
             throws IOException {
         if (!media.isFile() || media.length() < 1024) {
             throw new MediaException("The audio source file is missing or empty: " + media);
@@ -90,7 +144,9 @@ public final class AudioChunker {
             if (media.length() <= limitBytes && isAudioOnly(extractor)) {
                 final long durationUs = sourceDurationUs(format, media);
                 if (durationUs > 0) {
-                    chunks.add(new Chunk(media, 0, durationUs, false));
+                    final Chunk chunk = new Chunk(media, 0, durationUs, false);
+                    chunks.add(chunk);
+                    onChunk.accept(chunk);
                     listener.update(1.0, "Preparing audio for the cloud · 100%");
                     LOG.info("AudioChunker: " + media.getName()
                             + " already fits the upload limit; using it unchanged");
@@ -129,7 +185,7 @@ public final class AudioChunker {
                     LOG.info("AudioChunker: seam after "
                             + Fmt.time(chunkStartUs / 1_000_000.0) + "–"
                             + Fmt.time(pts / 1_000_000.0));
-                    closeChunk(muxer, chunkFile, chunks, chunkStartUs);
+                    closeChunk(muxer, chunkFile, chunks, chunkStartUs, onChunk);
                     muxer = null;
                     chunkFile = null;
                     index++;
@@ -166,7 +222,7 @@ public final class AudioChunker {
                 }
             }
             if (muxer != null) {
-                closeChunk(muxer, chunkFile, chunks, chunkStartUs);
+                closeChunk(muxer, chunkFile, chunks, chunkStartUs, onChunk);
                 muxer = null;
             }
         } catch (final IOException | RuntimeException e) {
@@ -177,6 +233,9 @@ public final class AudioChunker {
             }
             deleteAll(chunks, chunkFile);
             if (e instanceof IOException) {
+                throw e;
+            }
+            if (e instanceof OperationCancelledException) {
                 throw e;
             }
             throw new MediaException("Preparing the audio failed: " + e.getMessage(), e);
@@ -236,10 +295,41 @@ public final class AudioChunker {
     }
 
     private static void closeChunk(final MediaMuxer muxer, final File file,
-                                   final List<Chunk> chunks, final long startUs) throws IOException {
+                                   final List<Chunk> chunks, final long startUs,
+                                   final ChunkConsumer onChunk) throws IOException {
         muxer.stop();
         muxer.release();
-        chunks.add(new Chunk(file, startUs, queryDuration(file), true));
+        final Chunk chunk = new Chunk(file, startUs, queryDuration(file), true);
+        chunks.add(chunk);
+        // The file is final here; hand it over before muxing the next one.
+        onChunk.accept(chunk);
+    }
+
+    /**
+     * Duration of the first audio track in {@code media}, or 0 when it cannot
+     * be read. Callers that consume chunks while they are still being written
+     * use this to report progress along the source timeline.
+     */
+    public static long audioDurationUs(final File media) {
+        if (!media.isFile() || media.length() < 1024) {
+            return 0L;
+        }
+        MediaExtractor extractor = null;
+        try {
+            extractor = new MediaExtractor();
+            extractor.setDataSource(media.getAbsolutePath());
+            final int track = selectAudioTrack(extractor);
+            if (track < 0) {
+                return 0L;
+            }
+            return sourceDurationUs(extractor.getTrackFormat(track), media);
+        } catch (final IOException | RuntimeException e) {
+            return 0L;
+        } finally {
+            if (extractor != null) {
+                extractor.release();
+            }
+        }
     }
 
     /** Container duration of the selected track, or 0 when it is unknown. */
@@ -289,8 +379,11 @@ public final class AudioChunker {
 
     private static void deleteAll(final List<Chunk> chunks, final File extra) {
         for (final Chunk chunk : chunks) {
-            //noinspection ResultOfMethodCallIgnored
-            chunk.file().delete();
+            // The source file is not ours to delete when it is used unchanged.
+            if (chunk.temporary()) {
+                //noinspection ResultOfMethodCallIgnored
+                chunk.file().delete();
+            }
         }
         chunks.clear();
         if (extra != null) {

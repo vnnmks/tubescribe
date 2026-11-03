@@ -30,11 +30,14 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -381,6 +384,12 @@ public final class Pipeline {
      * No decoding: the compressed audio is split into upload-sized m4a chunks
      * by sample passthrough (a couple of seconds of file copying) and sent to
      * Groq as-is. Runs on branch 2, overlapping the video download.
+     *
+     * <p>Chunking runs on its own thread and hands over each chunk the moment
+     * its file is complete, so the first upload starts while the remaining
+     * chunks are still being muxed. Uploads stay sequential because chunk
+     * {@code i}'s prompt is the tail of chunk {@code i−1}'s transcript; the
+     * splitter runs ahead and the queue absorbs the difference.</p>
      */
     private void transcribe(final Run work, final boolean fetchedAudio) throws IOException {
         final double chunkAt = fetchedAudio ? 0.22 : 0.0;
@@ -389,24 +398,61 @@ public final class Pipeline {
         final double whisperSpan = 0.98 - whisperAt;
 
         final File audioIn = work.dash && valid(work.audio) ? work.audio : work.media;
+        final ChunkQueue chunks = new ChunkQueue(AudioChunker.audioDurationUs(audioIn));
+        final AtomicBoolean transcriptionStarted = new AtomicBoolean();
+        final ProgressListener chunkLive = map(work.audioProgress, chunkAt, chunkSpan);
+        // Once a chunk is uploading, its status line wins: the splitter's
+        // percentage must not replace it while later chunks are muxed.
+        final ProgressListener chunkProgress = (fraction, message) ->
+                chunkLive.update(fraction, transcriptionStarted.get() ? null : message);
+
+        final Thread splitter = new Thread(() -> {
+            try {
+                AudioChunker.split(audioIn, work.cacheDir, chunkProgress, work.audioCancel,
+                        chunks::accept);
+                chunks.finish();
+            } catch (final Throwable e) {
+                chunks.fail(e);
+            }
+        }, "audio-splitter");
         work.audioProgress.update(chunkAt, "Preparing audio for the cloud…");
-        final List<AudioChunker.Chunk> chunks = AudioChunker.split(
-                audioIn, work.cacheDir, map(work.audioProgress, chunkAt, chunkSpan), work.audioCancel);
+        splitter.start();
+        boolean complete = false;
         try {
-            work.audioCancel.throwIfCancelled();
-            work.audioProgress.update(whisperAt,
-                    "Transcribing with " + whisperModel.modelName() + "…");
+            final AudioChunker.ChunkSource source = new AudioChunker.ChunkSource() {
+                @Override
+                public AudioChunker.Chunk next() throws IOException {
+                    final AudioChunker.Chunk chunk = chunks.next();
+                    if (chunk != null) {
+                        transcriptionStarted.set(true);
+                    }
+                    return chunk;
+                }
+
+                @Override
+                public int knownTotal() {
+                    return chunks.knownTotal();
+                }
+
+                @Override
+                public double sourceDurationSec() {
+                    return chunks.sourceDurationSec();
+                }
+            };
             final SubtitleTrack track = new SubtitleTrack(
-                    new GroqTranscriber(groqKeys, whisperModel).transcribe(chunks,
+                    new GroqTranscriber(groqKeys, whisperModel).transcribe(source,
                             map(work.audioProgress, whisperAt, whisperSpan), work.audioCancel));
             writeSubtitleFile(work.subtitleFile, track);
+            complete = true;
         } finally {
-            for (final AudioChunker.Chunk chunk : chunks) {
-                if (chunk.temporary()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    chunk.file().delete();
-                }
+            // A failed upload must stop the splitter instead of leaving it
+            // muxing chunks that can never be sent. On success every chunk has
+            // been consumed, so the splitter has already reached its end.
+            if (!complete) {
+                work.audioCancel.cancel();
             }
+            joinQuietly(splitter);
+            deleteChunks(chunks.produced());
         }
     }
 
@@ -546,6 +592,34 @@ public final class Pipeline {
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new OperationCancelledException();
+        }
+    }
+
+    /**
+     * Waits for the splitter to stop without masking the failure that stopped
+     * it. Restores the interrupt flag afterwards so a cancelled run still
+     * unwinds as cancelled.
+     */
+    private static void joinQuietly(final Thread thread) {
+        boolean interrupted = false;
+        while (thread.isAlive()) {
+            try {
+                thread.join();
+            } catch (final InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void deleteChunks(final List<AudioChunker.Chunk> chunks) {
+        for (final AudioChunker.Chunk chunk : chunks) {
+            if (chunk.temporary()) {
+                //noinspection ResultOfMethodCallIgnored
+                chunk.file().delete();
+            }
         }
     }
 
@@ -881,6 +955,101 @@ public final class Pipeline {
                     + "); reporting the media half.");
         }
         return mediaError;
+    }
+
+    /**
+     * Hand-off from the splitter thread to the uploader. A completed chunk
+     * appears here the moment its file is closed; a sentinel wakes the
+     * consumer when the split finishes or fails. Unbounded on purpose: the
+     * splitter is much faster than the uploads it feeds, and the entries are
+     * just references to files already on disk.
+     */
+    private static final class ChunkQueue implements AudioChunker.ChunkSource {
+        private static final Object END = new Object();
+        private static final Object FAILED = new Object();
+
+        private final BlockingQueue<Object> items = new LinkedBlockingQueue<>();
+        private final List<AudioChunker.Chunk> produced = new ArrayList<>();
+        private final double sourceDurationSec;
+        private volatile int totalChunks;
+        private volatile Throwable failure;
+
+        ChunkQueue(final long sourceDurationUs) {
+            this.sourceDurationSec = sourceDurationUs / 1_000_000.0;
+        }
+
+        /** Splitter side: publish a completed chunk. */
+        void accept(final AudioChunker.Chunk chunk) throws IOException {
+            produced.add(chunk);
+            try {
+                items.put(chunk);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while handing off a chunk.", e);
+            }
+        }
+
+        /** Splitter side: the whole audio has been chunked. */
+        void finish() {
+            totalChunks = produced.size();
+            items.add(END);
+        }
+
+        /** Splitter side: wake the consumer with the cause of a failed split. */
+        void fail(final Throwable error) {
+            failure = error;
+            items.add(FAILED);
+        }
+
+        @Override
+        public AudioChunker.Chunk next() throws IOException {
+            while (true) {
+                final Object item;
+                try {
+                    item = items.take();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new OperationCancelledException();
+                }
+                if (item == END) {
+                    return null;
+                }
+                if (item == FAILED) {
+                    throw failure();
+                }
+                return (AudioChunker.Chunk) item;
+            }
+        }
+
+        @Override
+        public int knownTotal() {
+            return totalChunks;
+        }
+
+        @Override
+        public double sourceDurationSec() {
+            return sourceDurationSec;
+        }
+
+        /** Every chunk produced so far; read after the splitter has stopped. */
+        List<AudioChunker.Chunk> produced() {
+            return produced;
+        }
+
+        private IOException failure() {
+            final Throwable error = failure;
+            if (error instanceof OperationCancelledException) {
+                throw (OperationCancelledException) error;
+            }
+            if (error instanceof RuntimeException) {
+                throw (RuntimeException) error;
+            }
+            if (error instanceof IOException) {
+                return (IOException) error;
+            }
+            return new IOException(error == null
+                    ? "Preparing the audio failed." : error.toString(), error);
+        }
     }
 
     /**
