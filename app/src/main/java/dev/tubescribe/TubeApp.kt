@@ -111,6 +111,17 @@ object TubeApp {
             prefs.edit().putFloat("transcript_anchor", value).apply()
         }
 
+    /**
+     * How the transcript list tracks the playing subtitle, as the player's
+     * FollowMode enum name ("OFF", "FOLLOW", "IN_PLACE"). Kept across videos
+     * so the mode chosen once is restored everywhere.
+     */
+    var transcriptFollowMode: String
+        get() = prefs.getString("follow_mode", "FOLLOW") ?: "FOLLOW"
+        set(value) {
+            prefs.edit().putString("follow_mode", value).apply()
+        }
+
     /** Settings → Caching videos: how long cached videos may live, in ms (0 = no limit). */
     var cacheRetentionMs: Long
         get() = prefs.getLong("cache_retention_ms", 7L * 24 * 60 * 60 * 1000)

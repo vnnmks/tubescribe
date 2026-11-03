@@ -268,7 +268,13 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val currentIndex = track.indexAt(positionSec)
 
     var subsOn by rememberSaveable { mutableStateOf(true) }
-    var followMode by remember { mutableStateOf(FollowMode.FOLLOW) }
+    // Restored from the last session so the mode chosen on one video is
+    // already active on the next.
+    var followMode by remember {
+        mutableStateOf(FollowMode.entries.firstOrNull {
+            it.name == TubeApp.transcriptFollowMode
+        } ?: FollowMode.FOLLOW)
+    }
     var showMenu by remember { mutableStateOf(false) }
     var seeking by remember { mutableStateOf(false) }
     var seekTargetMs by remember { mutableLongStateOf(0L) }
@@ -850,7 +856,10 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             FollowMode.IN_PLACE -> Color.White
                         },
                         modifier = Modifier
-                            .clickable { followMode = followMode.next() }
+                            .clickable {
+                                followMode = followMode.next()
+                                TubeApp.transcriptFollowMode = followMode.name
+                            }
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
@@ -893,6 +902,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                 active = index == currentIndex,
                                 onClick = {
                                     followMode = FollowMode.OFF
+                                    TubeApp.transcriptFollowMode = followMode.name
                                     player.seekTo((cue.start() * 1000).toLong())
                                 }
                             )
