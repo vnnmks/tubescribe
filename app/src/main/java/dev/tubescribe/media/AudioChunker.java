@@ -31,35 +31,18 @@ import java.util.logging.Logger;
  * audio track below that limit is returned unchanged, because Groq accepts
  * the cached m4a as-is.</p>
  *
- * <p>Consecutive chunks are sequential: one chunk file runs from where the
- * previous file ends to its own seam, plus one tail window — there is no
- * special head and no seeking back. The audio just before a seam lives only
- * in the previous chunk's tail region, and the next request then begins
- * exactly where the previous request's conditioning text (the prior
- * transcript sent as the Whisper {@code prompt}) stops: the model hears a
- * continuation, not a replay. This
- * replaced the older rewound-head overlap after whisper repeatedly
- * suppressed the seam continuation: prompt text spoken again in the
- * audio is treated as an echo to skip, and the suppression extended
- * into the first words after it — at 01:50 of the reference video the
- * phrase "intend consciously" vanished from every overlapping-chunk
- * transcript. Cue ownership between chunk files is a plain partition by
- * file boundaries in {@code GroqTranscriber}; unmatched jitter is
- * handled there too.</p>
+ * <p>Consecutive chunks are sequential: each file starts at the sample where
+ * the previous file ended, so every audio sample is uploaded exactly once.
+ * Transcript continuity across a seam comes from sending the previous
+ * transcript as the next request's Whisper {@code prompt}, not from repeating
+ * audio in both files. Cue ownership is a plain partition by file boundaries
+ * in {@code GroqTranscriber}; unmatched jitter is handled there too.</p>
  */
 public final class AudioChunker {
     private static final Logger LOG = Logger.getLogger(AudioChunker.class.getName());
 
     /** Stay safely under Groq's 25 MB upload limit (25,000,000 bytes). */
     public static final long MAX_CHUNK_BYTES = 24_000_000L;
-    /** Smallest sane exclusive territory so tiny debug limits still work. */
-    private static final long MIN_CHUNK_BYTES = 128 * 1024;
-    /** Audio kept past every chunk's seam: this chunk still transcribes it
-     * (as the end of its file, where it reads the seam phrase whole), and
-     * the next chunk's file starts cleanly after it. */
-    public static final long TAIL_US = 20_000_000L;
-    /** Safety factor for the estimated tail margin bytes (VBR headroom). */
-    private static final double TAIL_SAFETY = 1.5;
     private static final int SAMPLE_BUFFER_BYTES = 256 * 1024;
 
     private AudioChunker() {
@@ -70,20 +53,12 @@ public final class AudioChunker {
      *
      * @param file        the chunk written to disk
      * @param startUs     global PTS of the chunk's first audio sample; segment
-     *                    timestamps returned for this file are offsets from here;
-     *                    since chunks are sequential this is also the previous
-     *                    chunk's file end
-     * @param authStartUs the chunk's own first sample's PTS (the exclusive
-     *                    territory starts with the file); with sequential files
-     *                    no sample of this file exists in the previous chunk
-     * @param authEndUs   exclusive territory end (the next seam); samples from
-     *                    it on belong partly to this chunk's tail region
+     *                    timestamps returned for this file are offsets from here
      * @param durationUs  container duration, for progress labels only
      * @param temporary   whether {@code file} is a private copy to delete after
      *                    transcription; false when it is the cached source
      */
-    public record Chunk(File file, long startUs, long authStartUs, long authEndUs,
-                        long durationUs, boolean temporary) {
+    public record Chunk(File file, long startUs, long durationUs, boolean temporary) {
     }
 
     public static List<Chunk> split(final File media, final File cacheDir,
@@ -115,7 +90,7 @@ public final class AudioChunker {
             if (media.length() <= limitBytes && isAudioOnly(extractor)) {
                 final long durationUs = sourceDurationUs(format, media);
                 if (durationUs > 0) {
-                    chunks.add(new Chunk(media, 0, 0, Long.MAX_VALUE, durationUs, false));
+                    chunks.add(new Chunk(media, 0, durationUs, false));
                     listener.update(1.0, "Preparing audio for the cloud · 100%");
                     LOG.info("AudioChunker: " + media.getName()
                             + " already fits the upload limit; using it unchanged");
@@ -130,16 +105,8 @@ public final class AudioChunker {
             int index = 0;
             int lastPercent = -1;
 
-            // Current chunk state. The chunk file covers, in global timeline
-            // time: the region since the previous chunk's file ended (this
-            // chunk's exclusive territory), then one tail window past the
-            // declared seam. startUs is the real first sample's PTS, so
-            // timestamps stay exact; audio before it lives in the previous
-            // chunk's tail region.
+            // Current chunk state.
             long chunkStartUs = 0;
-            long authStartUs = 0;     // the chunk's own first sample's PTS; 0 for the first chunk
-            long territoryEndUs = -1; // declared seam of this chunk; -1 = undecided
-            long territoryBytes = 0;  // bytes inside the territory (no tail)
             long chunkBytes = 0;      // every byte written to this chunk so far
             boolean haveSample = false;
 
@@ -155,32 +122,17 @@ public final class AudioChunker {
                 }
                 final long pts = extractor.getSampleTime();
 
-                // A territory ends where the byte budget would next be
-                // exceeded: the sample about to be written starts the next
-                // chunk. Writing continues for one tail window first.
-                if (territoryEndUs < 0 && territoryBytes > 0 && territoryBytes + size
-                        > territoryBudgetBytes(limitBytes, territoryBytes,
-                        pts - authStartUs)) {
-                    territoryEndUs = pts;
-                    LOG.info("AudioChunker: seam after " + Fmt.time(authStartUs / 1_000_000.0)
-                            + "–" + Fmt.time(territoryEndUs / 1_000_000.0));
-                }
-
-                if (territoryEndUs >= 0 && pts - territoryEndUs >= TAIL_US) {
-                    // The tail window is written. Close the chunk and let the
-                    // next file start at the very next sample — no rewind into
-                    // the seam region: that audio lives in this chunk only, and
-                    // the next request's prompt (the transcript so far) ends
-                    // right where this sample begins, so the model hears a
-                    // continuation instead of a reply of its own conditioning.
-                    // The triggering sample becomes the next chunk's first.
-                    closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, territoryEndUs);
+                // Close the current chunk when the next sample would push it
+                // past the upload limit. That sample opens the next chunk, so
+                // the files remain exactly adjacent and no audio is repeated.
+                if (chunkBytes > 0 && chunkBytes + size > limitBytes) {
+                    LOG.info("AudioChunker: seam after "
+                            + Fmt.time(chunkStartUs / 1_000_000.0) + "–"
+                            + Fmt.time(pts / 1_000_000.0));
+                    closeChunk(muxer, chunkFile, chunks, chunkStartUs);
                     muxer = null;
                     chunkFile = null;
                     index++;
-                    authStartUs = pts;
-                    territoryEndUs = -1;
-                    territoryBytes = 0;
                     chunkBytes = 0;
                     haveSample = false;
                     // No `continue`: this sample opens the next chunk below.
@@ -204,9 +156,6 @@ public final class AudioChunker {
                 info.flags = extractor.getSampleFlags();
                 muxer.writeSampleData(muxerTrack, buffer, info);
                 chunkBytes += size;
-                if (pts >= authStartUs && (territoryEndUs < 0 || pts < territoryEndUs)) {
-                    territoryBytes += size;
-                }
                 processed += size;
                 extractor.advance();
                 final int percent = (int) Math.min(99, processed * 100 / totalBytes);
@@ -217,9 +166,7 @@ public final class AudioChunker {
                 }
             }
             if (muxer != null) {
-                // The final chunk's territory runs to the end of the audio;
-                // samples were always written before the muxer existed.
-                closeChunk(muxer, chunkFile, chunks, chunkStartUs, authStartUs, Long.MAX_VALUE);
+                closeChunk(muxer, chunkFile, chunks, chunkStartUs);
                 muxer = null;
             }
         } catch (final IOException | RuntimeException e) {
@@ -250,9 +197,7 @@ public final class AudioChunker {
             final Chunk chunk = chunks.get(i);
             LOG.info("AudioChunker: chunk " + (i + 1) + "/" + chunks.size() + " covers "
                     + Fmt.time(chunk.startUs() / 1_000_000.0) + "–"
-                    + Fmt.time((chunk.startUs() + chunk.durationUs()) / 1_000_000.0)
-                    + ", territory " + (chunk.authEndUs() == Long.MAX_VALUE ? "end"
-                    : Fmt.time(chunk.authEndUs() / 1_000_000.0)));
+                    + Fmt.time((chunk.startUs() + chunk.durationUs()) / 1_000_000.0));
         }
         LOG.info("AudioChunker: " + media.getName() + " -> " + chunks.size() + " chunk(s), "
                 + media.length() / 1024 + "KB total");
@@ -277,29 +222,8 @@ public final class AudioChunker {
     }
 
     /**
-     * Byte budget for one chunk's exclusive territory. The tail window rides
-     * on top of it and must still fit inside the upload limit, so the budget
-     * is the limit minus one tail margin.
+     * Selects the first audio track in the container.
      */
-    private static long territoryBudgetBytes(final long limitBytes, final long territoryBytes,
-                                             final long spanUs) {
-        return Math.max(MIN_CHUNK_BYTES, limitBytes - tailMarginBytes(
-                limitBytes, territoryBytes, spanUs));
-    }
-
-    /** Estimated sample bytes in one tail window at the measured audio rate. */
-    private static long tailMarginBytes(final long limitBytes, final long bytes,
-                                        final long spanUs) {
-        long margin = MIN_CHUNK_BYTES; // fallback until a rate can be measured
-        if (spanUs > 1_000_000 && bytes > 0) {
-            final double bytesPerSec = bytes / (spanUs / 1_000_000.0);
-            margin = Math.round(bytesPerSec * (TAIL_US / 1_000_000.0) * TAIL_SAFETY);
-        }
-        // Never let the margin eat more than half the (debug) limit.
-        final long maxMargin = Math.max(64 * 1024, (limitBytes - MIN_CHUNK_BYTES) / 2);
-        return Math.min(margin, maxMargin);
-    }
-
     private static int selectAudioTrack(final MediaExtractor extractor) {
         for (int i = 0; i < extractor.getTrackCount(); i++) {
             final MediaFormat format = extractor.getTrackFormat(i);
@@ -312,11 +236,10 @@ public final class AudioChunker {
     }
 
     private static void closeChunk(final MediaMuxer muxer, final File file,
-                                   final List<Chunk> chunks, final long startUs,
-                                   final long authStartUs, final long authEndUs) throws IOException {
+                                   final List<Chunk> chunks, final long startUs) throws IOException {
         muxer.stop();
         muxer.release();
-        chunks.add(new Chunk(file, startUs, authStartUs, authEndUs, queryDuration(file), true));
+        chunks.add(new Chunk(file, startUs, queryDuration(file), true));
     }
 
     /** Container duration of the selected track, or 0 when it is unknown. */
