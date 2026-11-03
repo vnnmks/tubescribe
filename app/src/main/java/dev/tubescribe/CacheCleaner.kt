@@ -43,6 +43,45 @@ object CacheCleaner {
     /** Largest number of cached videos the custom input accepts. */
     const val MAX_CUSTOM_COUNT = 100
 
+    /**
+     * A transcript-less entry younger than this may belong to a run the user
+     * started just as the app was opening, so the startup sweep skips it.
+     */
+    private const val ORPHAN_MIN_AGE_MS = 5L * 60 * 1000
+
+    /** Covers both `subtitles-<model>.srt` and the pre-0.4.2 `subtitles.srt`. */
+    fun hasTranscript(dir: File): Boolean =
+        dir.listFiles()?.any {
+            it.isFile && it.name.startsWith("subtitles") && it.name.endsWith(".srt")
+        } == true
+
+    /**
+     * Deletes entries left behind by a run the system killed. Runs once at
+     * process start, when no run can be active, so a missing transcript means
+     * the entry can never be opened. Saved entries and very fresh ones (see
+     * [ORPHAN_MIN_AGE_MS]) are left alone.
+     */
+    @Synchronized
+    fun cleanOrphans(cacheRoot: File) {
+        val saved = TubeApp.savedVideoIds
+        val cutoff = System.currentTimeMillis() - ORPHAN_MIN_AGE_MS
+        var removed = 0
+        cacheRoot.listFiles(File::isDirectory)?.forEach { dir ->
+            if (saved.contains(dir.name) || hasTranscript(dir)) {
+                return@forEach
+            }
+            if (newestMtime(dir) > cutoff) {
+                return@forEach
+            }
+            if (deleteEntry(dir)) {
+                removed++
+            }
+        }
+        if (removed > 0) {
+            LOG.info("Removed " + removed + " unfinished cache entries")
+        }
+    }
+
     /** Disk usage snapshot of the video cache, for the settings screen. */
     data class DiskUsage(val totalBytes: Long, val savedBytes: Long, val entries: Int)
 

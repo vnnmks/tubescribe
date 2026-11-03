@@ -10,6 +10,7 @@ import dev.tubescribe.util.Cancellation
 import dev.tubescribe.util.OperationCancelledException
 import dev.tubescribe.util.ProgressListener
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 sealed interface PipelineState {
     data object Idle : PipelineState
@@ -98,11 +100,28 @@ class TubeViewModel : ViewModel() {
                     }
                 }
             } catch (e: OperationCancelledException) {
+                discard(videoId)
                 _state.value = PipelineState.Idle
             } catch (e: Exception) {
+                discard(videoId)
                 _state.value = PipelineState.Failed(e.message ?: e.toString())
             } finally {
                 cancellation = null
+            }
+        }
+    }
+
+    /**
+     * The run never reached the player. If the entry has no transcript either,
+     * nothing on disk can be played, so drop it instead of leaving invisible
+     * bytes behind. An existing transcript belongs to an earlier, finished run
+     * and must survive a cancelled or failed re-run.
+     */
+    private suspend fun discard(videoId: String) {
+        withContext(Dispatchers.IO + NonCancellable) {
+            val dir = File(TubeApp.cacheDir, videoId)
+            if (!CacheCleaner.hasTranscript(dir)) {
+                runCatching { CacheCleaner.delete(TubeApp.cacheDir, videoId) }
             }
         }
     }

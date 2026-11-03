@@ -17,8 +17,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         TubeApp.init(this)
-        // Settings → Caching videos: prune the cache once at process start.
-        Thread { runCatching { CacheCleaner.clean(TubeApp.cacheDir) } }.start()
+        // Prune the cache once at process start: unfinished entries first (a
+        // run that the system killed while it was mid-download), then the
+        // Settings → Caching videos age/count limits.
+        Thread {
+            runCatching {
+                CacheCleaner.cleanOrphans(TubeApp.cacheDir)
+                CacheCleaner.clean(TubeApp.cacheDir)
+            }
+        }.start()
         if (savedInstanceState == null) {
             handleIntent(intent)
         }
