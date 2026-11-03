@@ -8,10 +8,16 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import dev.tubescribe.media.StreamCacheDataSource
 import java.io.File
 
 /**
@@ -41,6 +47,7 @@ class PlaybackService : MediaSessionService() {
 }
 
 /** Process-wide owner of the ExoPlayer and its session, shared by the player screen and the service. */
+@OptIn(UnstableApi::class)
 object PlaybackHolder {
     private var player: ExoPlayer? = null
 
@@ -51,12 +58,49 @@ object PlaybackHolder {
     fun start(
         context: Context,
         mediaPath: String,
+        audioPath: String?,
+        videoUrl: String?,
+        videoComplete: Boolean,
         title: String,
         artist: String,
         startMs: Long
     ): ExoPlayer {
         release()
         val app = context.applicationContext
+        val videoFile = File(mediaPath)
+        // While a DASH video is still being streamed, its local file is a
+        // sparse prefix; the range data source fills the rest on demand.
+        // A complete entry (and every progressive entry) plays straight from
+        // disk. Audio is always complete, so it is a plain file source.
+        val liveUrl = if (videoComplete) null else videoUrl?.takeIf { it.isNotBlank() }
+        val videoFactory = if (liveUrl != null) {
+            StreamCacheDataSource.Factory(videoFile, liveUrl)
+        } else {
+            DefaultDataSource.Factory(app)
+        }
+        val videoItem = MediaItem.Builder()
+            .setUri(if (liveUrl != null) Uri.parse(liveUrl) else Uri.fromFile(videoFile))
+            .setMimeType(MimeTypes.VIDEO_MP4)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(artist.ifBlank { null })
+                    .build()
+            )
+            .build()
+        val videoSource = ProgressiveMediaSource.Factory(videoFactory)
+            .createMediaSource(videoItem)
+        val mediaSource = if (!audioPath.isNullOrBlank()) {
+            val audioItem = MediaItem.Builder()
+                .setUri(Uri.fromFile(File(audioPath)))
+                .setMimeType(MimeTypes.AUDIO_MP4)
+                .build()
+            val audioSource = ProgressiveMediaSource.Factory(DefaultDataSource.Factory(app))
+                .createMediaSource(audioItem)
+            MergingMediaSource(videoSource, audioSource)
+        } else {
+            videoSource
+        }
         val exo = ExoPlayer.Builder(app)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -69,17 +113,7 @@ object PlaybackHolder {
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
             .apply {
-                setMediaItem(
-                    MediaItem.Builder()
-                        .setUri(Uri.fromFile(File(mediaPath)))
-                        .setMediaMetadata(
-                            MediaMetadata.Builder()
-                                .setTitle(title)
-                                .setArtist(artist.ifBlank { null })
-                                .build()
-                        )
-                        .build()
-                )
+                setMediaSource(mediaSource)
                 playWhenReady = true
                 prepare()
                 if (startMs > 0L) seekTo(startMs)
