@@ -1,5 +1,6 @@
 package dev.tubescribe
 
+import dev.tubescribe.media.StreamCache
 import java.io.File
 import java.util.logging.Logger
 
@@ -53,8 +54,19 @@ object CacheCleaner {
         val savedIds = TubeApp.savedVideoIds
         cacheRoot.listFiles(File::isDirectory)?.forEach { dir ->
             entries++
+            // A streaming DASH video is a sparse file: its logical length can
+            // be the whole stream while only a prefix is on disk. Count the
+            // ranges actually downloaded in that case.
+            val indexed = File(dir, "video.mp4.idx").isFile
             val bytes = dir.listFiles()
-                ?.sumOf { file -> if (file.isFile) file.length() else 0L } ?: 0L
+                ?.sumOf { file ->
+                    when {
+                        !file.isFile -> 0L
+                        indexed && file.name == "video.mp4" ->
+                            StreamCache.downloadedBytes(file)
+                        else -> file.length()
+                    }
+                } ?: 0L
             total += bytes
             if (savedIds.contains(dir.name)) {
                 saved += bytes

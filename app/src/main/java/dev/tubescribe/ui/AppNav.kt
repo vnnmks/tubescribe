@@ -25,7 +25,12 @@ data class PlayerArgs(
     val uploader: String,
     val qualityLabel: String,
     val qualityNote: String = "",
-    val modelLabel: String = ""
+    val modelLabel: String = "",
+    /** Complete audio track of a DASH pair; null for a progressive file. */
+    val audioPath: String? = null,
+    /** Live video URL while the DASH video is still being streamed. */
+    val videoUrl: String? = null,
+    val videoComplete: Boolean = true
 ) {
     companion object {
         fun from(result: Pipeline.Result): PlayerArgs {
@@ -38,7 +43,10 @@ data class PlayerArgs(
                 uploader = info.uploader(),
                 qualityLabel = info.qualityLabel(),
                 qualityNote = availabilityNote(info),
-                modelLabel = result.model().label()
+                modelLabel = result.model().label(),
+                audioPath = result.audioFile()?.absolutePath,
+                videoUrl = if (result.videoComplete()) null else info.videoUrl(),
+                videoComplete = result.videoComplete()
             )
         }
 
@@ -52,7 +60,9 @@ data class PlayerArgs(
             title = recent.title(),
             uploader = recent.uploader() ?: "",
             qualityLabel = recent.qualityLabel(),
-            modelLabel = model.label()
+            modelLabel = model.label(),
+            audioPath = recent.audioFile()?.absolutePath,
+            videoComplete = recent.videoComplete()
         )
     }
 }

@@ -1,10 +1,14 @@
 package dev.tubescribe;
 
+import androidx.media3.datasource.HttpDataSource;
+import androidx.media3.datasource.HttpDataSource.HttpDataSourceException;
+
 import dev.tubescribe.media.AudioChunker;
 import dev.tubescribe.media.MediaDownloader;
 import dev.tubescribe.media.MediaException;
 import dev.tubescribe.media.Quality;
-import dev.tubescribe.media.StreamMerger;
+import dev.tubescribe.media.StreamCache;
+import dev.tubescribe.media.StreamCacheDataSource;
 import dev.tubescribe.net.VideoInfo;
 import dev.tubescribe.net.YouTubeClient;
 import dev.tubescribe.net.YouTubeException;
@@ -38,14 +42,21 @@ import java.util.logging.Logger;
  * Groq Whisper → subtitle cues, with a per-video disk cache.
  *
  * <p>Unlike the desktop original this pipeline is cloud-only (Groq) and uses
- * MediaCodec/MediaMuxer instead of FFmpeg for audio extraction and stream
- * merging.</p>
+ * MediaCodec/MediaMuxer instead of FFmpeg for audio extraction and chunking.
+ * DASH video and audio are kept as separate tracks and merged at playback
+ * time, so the video can be streamed while it is still incomplete.</p>
  */
 public final class Pipeline {
     private static final Logger LOG = Logger.getLogger(Pipeline.class.getName());
     /** Layout before 0.4.2: one transcript plus a marker naming its model. */
     private static final String LEGACY_SUBTITLES = "subtitles.srt";
     private static final String MODEL_FILE = "transcript.model";
+    /**
+     * How much of a DASH video stream is fetched before the player opens.
+     * Playback continues from this prefix on demand; the number is a head
+     * start, not a limit (roughly 10–25 s depending on resolution).
+     */
+    private static final long PREFETCH_BYTES = 8L * 1024 * 1024;
 
     private final File cacheRoot;
     private final List<String> groqKeys;
@@ -59,8 +70,9 @@ public final class Pipeline {
         this.whisperModel = whisperModel;
     }
 
-    public record Result(File mediaFile, File subtitleFile, SubtitleTrack subtitles,
-                         VideoInfo video, boolean fromCache, GroqModel model) {
+    public record Result(File mediaFile, File audioFile, File subtitleFile, SubtitleTrack subtitles,
+                         VideoInfo video, boolean fromCache, boolean videoComplete,
+                         GroqModel model) {
     }
 
     public Result run(final String input, final Quality quality,
@@ -77,26 +89,39 @@ public final class Pipeline {
         //noinspection ResultOfMethodCallIgnored
         cacheDir.mkdirs();
         final File media = new File(cacheDir, "video.mp4");
-        final File audioSource = new File(cacheDir, "audio-source.m4a");
-        migrateLegacySubtitles(cacheDir);
-        final File subtitleFile = subtitleFileFor(cacheDir, whisperModel);
+        final File audio = new File(cacheDir, "audio.m4a");
         final File metaFile = new File(cacheDir, "meta.properties");
+        migrateLegacySubtitles(cacheDir);
+
+        // A DASH entry is a pair: video.mp4 (video-only, possibly still being
+        // streamed) + audio.m4a (always complete). A progressive entry is one
+        // muxed video.mp4 and has no separate audio.
+        final CachedMeta cached = readMeta(id, metaFile);
+        cleanupIntermediates(cacheDir, cached.dash());
+        final File subtitleFile = subtitleFileFor(cacheDir, whisperModel);
+        boolean dash = cached.dash();
+        boolean videoComplete = dash ? StreamCache.isComplete(media) : valid(media);
+        boolean audioComplete = valid(audio);
+        boolean needVideo = !videoComplete;
+        boolean needAudio = dash && !audioComplete;
+        final boolean needSubs = !subtitleFile.isFile();
 
         // Every model keeps its own transcript, so switching the picker only
         // re-transcribes when that model has not run on this video yet.
-        if (valid(media) && subtitleFile.isFile()) {
-            final VideoInfo cached = readMeta(id, metaFile);
-            VideoInfo served = cached;
+        if (videoComplete && !needAudio && !needSubs) {
+            VideoInfo served = cached.info();
             // Re-requesting a cached video at a higher quality upgrades the
             // download in place; the old copy only leaves the cache once the
             // new one is fully loaded.
             String note = null;
             boolean upgraded = false;
-            if (quality.maxHeight() > cached.height()) {
+            if (quality.maxHeight() > served.height()) {
                 final UpgradeOutcome outcome = upgradeCachedMedia(
-                        input, quality, cacheDir, metaFile, media, audioSource, cached, listener, cancel);
+                        input, quality, cacheDir, metaFile, media, audio, served, dash,
+                        listener, cancel);
                 if (outcome.info() != null) {
                     served = outcome.info();
+                    dash = outcome.dash();
                     upgraded = true;
                 } else {
                     note = outcome.note();
@@ -108,24 +133,18 @@ public final class Pipeline {
                     ? "no speech detected" : (track.size() + " subtitle cues");
             if (upgraded) {
                 listener.update(1.0, "Upgraded · " + qualityNote(served) + " · " + subtitleSummary);
-                return new Result(media, subtitleFile, track, served, false, whisperModel);
+                return new Result(media, dash ? audio : null, subtitleFile, track, served,
+                        false, true, whisperModel);
             }
             if (note != null) {
                 listener.update(1.0, note + " · " + subtitleSummary);
             } else {
                 listener.update(1.0, "Loaded video and subtitles from cache");
             }
-            return new Result(media, subtitleFile, track, served, true, whisperModel);
+            return new Result(media, dash ? audio : null, subtitleFile, track, served,
+                    true, true, whisperModel);
         }
 
-        final boolean needMedia = !valid(media);
-        // A video cached with another model only needs this model's transcript
-        // (the cached video itself is reused).
-        final boolean needSubs = !subtitleFile.isFile();
-        if (needMedia) {
-            //noinspection ResultOfMethodCallIgnored
-            media.delete();
-        }
         // Fail before a single byte of video is fetched when transcription
         // cannot run. An unreadable key still surfaces during the upload.
         if (needSubs && groqKeys.isEmpty()) {
@@ -136,29 +155,52 @@ public final class Pipeline {
 
         // One resolve feeds both halves of the work. It is a single small page
         // fetch, so it stays on this thread before anything forks.
-        VideoInfo resolvedOrNull = null;
-        if (needMedia) {
+        VideoInfo resolved = null;
+        if (needVideo || needAudio) {
             listener.update(0.02, "Checking YouTube…");
             YouTubeClient.initialize(null);
-            resolvedOrNull = new YouTubeClient().resolve(input, quality);
+            resolved = new YouTubeClient().resolve(input, quality);
         }
-        final VideoInfo resolved = resolvedOrNull;
+        if (needVideo) {
+            final boolean resolvedDash = resolved.requiresMerge();
+            final boolean formatChanged = cached.dash() != resolvedDash;
+            final boolean qualityChanged = cached.info().height() > 0 && resolved.height() > 0
+                    && cached.info().height() != resolved.height();
+            // A partially streamed file belongs to one concrete stream. If the
+            // requested quality or the stream layout changed, those bytes are
+            // not reusable — start that stream over (subtitles stay valid).
+            if (formatChanged || qualityChanged) {
+                resetPartialStreams(media, audio);
+                videoComplete = false;
+                audioComplete = false;
+            }
+            dash = resolvedDash;
+            needAudio = dash && !audioComplete;
+        } else if (needAudio && (resolved == null || !resolved.requiresMerge())) {
+            // The cached pair lost its audio and YouTube now only offers a
+            // progressive stream: replace the entry rather than leave it mute.
+            resetPartialStreams(media, audio);
+            videoComplete = false;
+            audioComplete = false;
+            dash = false;
+            needVideo = true;
+            needAudio = false;
+        }
 
-        // DASH videos arrive as two files, so the media half (video → mux) and
-        // the audio half (audio → chunks → Whisper) run side by side: the wait
-        // becomes max(video+merge, audio+chunk+transcribe) instead of the sum.
-        // A progressive stream is a single file that doubles as the
-        // transcription input, so that path stays serial, as before.
-        final boolean dash = needMedia && resolved.requiresMerge();
-        final boolean runMedia = needMedia;
-        final boolean runAudio = dash || needSubs;
+        // DASH: the audio half downloads the (small) audio file first, then
+        // chunks and transcribes it while the video half prefetches the first
+        // few MiB of the video. The player opens as soon as the transcript and
+        // that prefix are ready, and keeps streaming the rest on demand.
+        // Progressive: the single file is also the transcription input, so the
+        // video half must finish before the audio half can start, as before.
+        final boolean runMedia = needVideo;
+        final boolean runAudio = needAudio || needSubs;
 
         // Released once the file branch 2 reads is on disk — or as soon as
-        // either branch dies. Branch 1 waits on it before muxing, branch 2
-        // before chunking; every release path is covered, so it cannot hang.
+        // either branch dies. Every release path is covered, so it cannot hang.
         final CountDownLatch audioReady = new CountDownLatch(1);
-        if (!runMedia) {
-            audioReady.countDown();     // video.mp4 is already on disk
+        if (!runAudio || (dash ? audioComplete : videoComplete)) {
+            audioReady.countDown();
         }
 
         final ProgressAggregator progress = new ProgressAggregator(listener, runMedia, runAudio);
@@ -173,8 +215,8 @@ public final class Pipeline {
         mediaCancel.addHook(audioReady::countDown);
         audioCancel.addHook(audioReady::countDown);
 
-        final Run work = new Run(input, quality, resolved, cacheDir, media, audioSource,
-                subtitleFile, metaFile, dash, needSubs, audioReady, progress,
+        final Run work = new Run(input, quality, resolved, cacheDir, media, audio,
+                subtitleFile, metaFile, dash, needAudio, needSubs, audioReady, progress,
                 mediaCancel, audioCancel);
 
         VideoInfo downloaded = null;
@@ -201,20 +243,23 @@ public final class Pipeline {
             }
         }
 
-        final VideoInfo info = runMedia ? downloaded : readMeta(id, metaFile);
-
-        // The transcription is stored; the bulky intermediates are no longer needed.
-        //noinspection ResultOfMethodCallIgnored
-        audioSource.delete();
+        final VideoInfo info = runMedia ? downloaded : cached.info();
+        final boolean videoCompleteNow = dash ? StreamCache.isComplete(media) : valid(media);
+        final File audioFile = dash ? audio : null;
+        if (!dash) {
+            //noinspection ResultOfMethodCallIgnored
+            audio.delete();
+        }
 
         final SubtitleTrack track = SubtitleTrack.readSrt(subtitleFile.toPath());
         final String qualityNote = qualityNote(info);
         final String subtitleSummary = track.isEmpty() ? "no speech detected"
                 : track.size() + " subtitle cues";
-        listener.update(1.0, qualityNote.isEmpty()
-                ? (track.isEmpty() ? "Media ready · no speech detected" : "Ready · " + subtitleSummary)
-                : "Ready · " + qualityNote + " · " + subtitleSummary);
-        return new Result(media, subtitleFile, track, info, false, whisperModel);
+        listener.update(1.0, (videoCompleteNow ? "Ready" : "Streaming")
+                + (qualityNote.isEmpty() ? "" : " · " + qualityNote)
+                + (track.isEmpty() ? " · no speech detected" : " · " + subtitleSummary));
+        return new Result(media, audioFile, subtitleFile, track, info, false,
+                videoCompleteNow, whisperModel);
     }
 
     /** One run's shared state for the two parallel halves. */
@@ -224,10 +269,11 @@ public final class Pipeline {
         final VideoInfo resolved;
         final File cacheDir;
         final File media;
-        final File audioSource;
+        final File audio;
         final File subtitleFile;
         final File metaFile;
         final boolean dash;
+        final boolean needAudio;
         final boolean needSubs;
         final CountDownLatch audioReady;
         final ProgressListener mediaProgress;
@@ -236,9 +282,9 @@ public final class Pipeline {
         final Cancellation audioCancel;
 
         Run(final String input, final Quality quality, final VideoInfo resolved,
-            final File cacheDir, final File media, final File audioSource,
+            final File cacheDir, final File media, final File audio,
             final File subtitleFile, final File metaFile, final boolean dash,
-            final boolean needSubs,
+            final boolean needAudio, final boolean needSubs,
             final CountDownLatch audioReady, final ProgressAggregator progress,
             final Cancellation mediaCancel, final Cancellation audioCancel) {
             this.input = input;
@@ -246,10 +292,11 @@ public final class Pipeline {
             this.resolved = resolved;
             this.cacheDir = cacheDir;
             this.media = media;
-            this.audioSource = audioSource;
+            this.audio = audio;
             this.subtitleFile = subtitleFile;
             this.metaFile = metaFile;
             this.dash = dash;
+            this.needAudio = needAudio;
             this.needSubs = needSubs;
             this.audioReady = audioReady;
             this.mediaProgress = progress.branch(true);
@@ -260,25 +307,20 @@ public final class Pipeline {
     }
 
     /**
-     * Half 1 — the video side: fetch it, then mux it into {@code video.mp4}.
-     * For DASH it waits only for the audio <em>file</em> (a small download that
-     * branch 2 makes first), never for the transcription; both usually finish
-     * while Whisper is still running.
+     * Half 1 — the video side. For DASH it waits for the audio <em>file</em>
+     * (a small download that branch 2 makes first), then prefetches the first
+     * few MiB of the video and returns: playback streams the rest on demand.
+     * For a progressive stream the single file is also the transcription
+     * input, so it must be downloaded completely before branch 2 starts.
      */
     private VideoInfo produceMedia(final Run work) throws Exception {
         try {
-            final File videoSource = new File(work.cacheDir, "video-source.mp4");
             final VideoInfo info;
             if (work.dash) {
-                info = downloadVideo(work.input, work.quality, work.resolved, videoSource, false,
-                        map(work.mediaProgress, 0.0, 0.80), work.mediaCancel);
-                work.mediaCancel.throwIfCancelled();
                 awaitLatch(work.audioReady);
                 work.mediaCancel.throwIfCancelled();
-                work.mediaProgress.update(0.85, "Merging streams…");
-                StreamMerger.merge(videoSource, work.audioSource, work.media, work.mediaCancel);
-                //noinspection ResultOfMethodCallIgnored
-                videoSource.delete();
+                info = prefetchVideo(work.input, work.quality, work.resolved, work.media,
+                        map(work.mediaProgress, 0.0, 0.98), work.mediaCancel);
                 if (!valid(work.media)) {
                     throw new MediaException("The downloaded video is empty.");
                 }
@@ -294,8 +336,9 @@ public final class Pipeline {
             // Persist the title/quality the moment the media is on disk: a
             // transcription failure in the other half must not cost them, and
             // a later retry that only needs subtitles reads them back here.
-            saveMeta(work.metaFile, info);
-            work.mediaProgress.update(1.0, "Video ready");
+            saveMeta(work.metaFile, info, work.dash);
+            work.mediaProgress.update(1.0, work.dash && !StreamCache.isComplete(work.media)
+                    ? "Video ready · streaming" : "Video ready");
             return info;
         } catch (final Exception e) {
             // The media half died: stop the transcription half rather than
@@ -308,21 +351,22 @@ public final class Pipeline {
     /** Half 2 — the audio side: fetch it (DASH only), chunk it, transcribe it. */
     private void produceAudio(final Run work) throws Exception {
         try {
-            final boolean fetched;
+            final boolean separateAudio = work.dash;
             if (work.dash) {
-                downloadAudio(work.input, work.quality, work.resolved, work.audioSource,
-                        map(work.audioProgress, 0.0, 0.20), work.audioCancel);
+                if (work.needAudio) {
+                    downloadAudio(work.input, work.quality, work.resolved, work.audio,
+                            map(work.audioProgress, 0.0, 0.20), work.audioCancel);
+                }
                 work.audioReady.countDown();
-                fetched = true;
             } else {
-                // Progressive (or the media is already cached): the input is
-                // video.mp4, so wait for half 1 to produce it.
+                // Progressive: video.mp4 is the transcription input. It is
+                // either already on disk (latch pre-released) or branch 1
+                // releases the latch once the full download completes.
                 awaitLatch(work.audioReady);
                 work.audioCancel.throwIfCancelled();
-                fetched = false;
             }
             if (work.needSubs) {
-                transcribe(work, fetched);
+                transcribe(work, separateAudio);
             }
             work.audioProgress.update(1.0, work.needSubs ? "Subtitles ready" : "Audio ready");
         } catch (final Exception e) {
@@ -344,7 +388,7 @@ public final class Pipeline {
         final double whisperAt = fetchedAudio ? 0.34 : 0.14;
         final double whisperSpan = 0.98 - whisperAt;
 
-        final File audioIn = valid(work.audioSource) ? work.audioSource : work.media;
+        final File audioIn = work.dash && valid(work.audio) ? work.audio : work.media;
         work.audioProgress.update(chunkAt, "Preparing audio for the cloud…");
         final List<AudioChunker.Chunk> chunks = AudioChunker.split(
                 audioIn, work.cacheDir, map(work.audioProgress, chunkAt, chunkSpan), work.audioCancel);
@@ -396,6 +440,52 @@ public final class Pipeline {
         throw new MediaException("Could not download the media after refreshing the stream URL.");
     }
 
+    /**
+     * Fetches the first {@link #PREFETCH_BYTES} of a DASH video stream into
+     * its range cache. The rest is fetched by the player's data source as it
+     * plays (and seeks), so this deliberately stops long before the end.
+     */
+    private VideoInfo prefetchVideo(final String input, final Quality quality,
+                                    final VideoInfo initial, final File target,
+                                    final ProgressListener listener,
+                                    final Cancellation cancel) throws Exception {
+        VideoInfo info = initial;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            // A refreshed resolve may land on a progressive stream (or none);
+            // never fall through to a null URL on the retry.
+            final String videoUrl = info.videoUrl();
+            if (videoUrl == null || videoUrl.isBlank()) {
+                throw new MediaException(attempt == 0
+                        ? "YouTube did not provide a video stream URL."
+                        : "YouTube no longer offers a separate video stream.");
+            }
+            try {
+                listener.update(0.0, "Buffering video…");
+                StreamCacheDataSource.prefetch(videoUrl, new StreamCache(target),
+                        PREFETCH_BYTES, listener, cancel);
+                cancel.throwIfCancelled();
+                return info;
+            } catch (final HttpDataSourceException e) {
+                if (attempt == 0 && expired(e)) {
+                    listener.update(0.0, "Media URL expired; refreshing YouTube link…");
+                    LOG.info("Refreshing expired video URL for " + info.id());
+                    info = new YouTubeClient().resolve(input, quality);
+                    continue;
+                }
+                throw new MediaException("Video streaming failed: " + e.getMessage(), e);
+            } catch (final IOException e) {
+                if (attempt == 0 && expired(e)) {
+                    listener.update(0.0, "Media URL expired; refreshing YouTube link…");
+                    LOG.info("Refreshing expired video URL for " + info.id());
+                    info = new YouTubeClient().resolve(input, quality);
+                    continue;
+                }
+                throw new MediaException("Video streaming failed: " + e.getMessage(), e);
+            }
+        }
+        throw new MediaException("Could not stream the video after refreshing the stream URL.");
+    }
+
     /** The audio half's download, with the same expired-URL retry as the video. */
     private VideoInfo downloadAudio(final String input, final Quality quality,
                                     final VideoInfo initial, final File target,
@@ -424,7 +514,23 @@ public final class Pipeline {
 
     /** Googlevideo URLs expire; 403/410 (or an explicit "expired") says refresh. */
     private static boolean expired(final MediaException e) {
-        final String message = e.getMessage() == null ? "" : e.getMessage();
+        return expiredMessage(e.getMessage());
+    }
+
+    private static boolean expired(final HttpDataSourceException e) {
+        if (e instanceof HttpDataSource.InvalidResponseCodeException) {
+            final int code = ((HttpDataSource.InvalidResponseCodeException) e).responseCode;
+            return code == 403 || code == 410;
+        }
+        return expiredMessage(e.getMessage());
+    }
+
+    private static boolean expired(final IOException e) {
+        return expiredMessage(e.getMessage());
+    }
+
+    private static boolean expiredMessage(final String value) {
+        final String message = value == null ? "" : value;
         return message.contains("HTTP 403")
                 || message.contains("HTTP 410")
                 || message.toLowerCase(java.util.Locale.ROOT).contains("expired");
@@ -450,11 +556,15 @@ public final class Pipeline {
      */
     private UpgradeOutcome upgradeCachedMedia(final String input, final Quality quality,
                                               final File cacheDir, final File metaFile,
-                                              final File media, final File audioSource,
-                                              final VideoInfo cached,
+                                              final File media, final File audio,
+                                              final VideoInfo cached, final boolean cachedDash,
                                               final ProgressListener listener,
                                               final Cancellation cancel) throws Exception {
-        final File upgraded = new File(cacheDir, "video-upgrade.mp4");
+        final File upgradedVideo = new File(cacheDir, "video-upgrade.mp4");
+        final File upgradedAudio = new File(cacheDir, "audio-upgrade.m4a");
+        final File videoBackup = new File(cacheDir, "video-old.mp4");
+        final File indexBackup = new File(cacheDir, "video-old.mp4.idx");
+        final File audioBackup = new File(cacheDir, "audio-old.m4a");
         try {
             cancel.throwIfCancelled();
             listener.update(0.05, "Checking YouTube…");
@@ -464,56 +574,72 @@ public final class Pipeline {
                 LOG.info("No quality above " + cached.height() + "p available for " + cached.id()
                         + "; keeping the cached video");
                 return new UpgradeOutcome(null,
-                        "No higher quality available — keeping the cached video");
+                        "No higher quality available — keeping the cached video", cachedDash);
             }
             listener.update(0.06, "Upgrading cached video to " + resolved.qualityLabel() + "…");
             final VideoInfo fetched;
-            if (resolved.requiresMerge()) {
-                final File videoSource = new File(cacheDir, "video-source.mp4");
-                fetched = downloadVideo(input, quality, resolved, videoSource, false,
-                        map(listener, 0.06, 0.60), cancel);
+            final boolean newDash = resolved.requiresMerge();
+            if (newDash) {
+                fetched = downloadVideo(input, quality, resolved, upgradedVideo, false,
+                        map(listener, 0.06, 0.54), cancel);
                 cancel.throwIfCancelled();
-                downloadAudio(input, quality, fetched, audioSource,
-                        map(listener, 0.66, 0.24), cancel);
+                downloadAudio(input, quality, fetched, upgradedAudio,
+                        map(listener, 0.62, 0.28), cancel);
                 cancel.throwIfCancelled();
-                listener.update(0.90, "Merging streams…");
-                StreamMerger.merge(videoSource, audioSource, upgraded, cancel);
-                //noinspection ResultOfMethodCallIgnored
-                videoSource.delete();
             } else {
-                fetched = downloadVideo(input, quality, resolved, upgraded, true,
+                fetched = downloadVideo(input, quality, resolved, upgradedVideo, true,
                         map(listener, 0.06, 0.84), cancel);
             }
-            if (!valid(upgraded)) {
+            if (!valid(upgradedVideo)) {
                 throw new MediaException("The downloaded video is empty.");
             }
-            // Fully loaded and verified — now swap it in. The old file is
+            if (newDash && !valid(upgradedAudio)) {
+                throw new MediaException("The downloaded audio is empty.");
+            }
+            // Fully loaded and verified — now swap it in. The old files are
             // moved aside first so a failed swap can be undone.
-            final File backup = new File(cacheDir, "video-old.mp4");
-            final boolean keptOldFile = media.renameTo(backup);
+            final boolean keptOldVideo = media.renameTo(videoBackup);
+            if (!keptOldVideo && media.isFile()) {
+                throw new IOException("Could not move the cached video aside.");
+            }
+            final File oldIndex = new File(media.getParentFile(), media.getName() + ".idx");
+            final boolean keptOldIndex = oldIndex.renameTo(indexBackup);
+            final boolean keptOldAudio = audio.isFile() && audio.renameTo(audioBackup);
+            boolean swapped = false;
             try {
-                try {
-                    Files.move(upgraded.toPath(), media.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-                } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-                    Files.move(upgraded.toPath(), media.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING);
+                move(upgradedVideo, media);
+                if (newDash) {
+                    StreamCache.markComplete(media);
+                    move(upgradedAudio, audio);
+                } else {
+                    //noinspection ResultOfMethodCallIgnored
+                    oldIndex.delete();
+                    //noinspection ResultOfMethodCallIgnored
+                    audio.delete();
                 }
-                saveMeta(metaFile, fetched);
-                return new UpgradeOutcome(fetched, null);
+                swapped = true;
+                saveMeta(metaFile, fetched, newDash);
+                return new UpgradeOutcome(fetched, null, newDash);
             } catch (final Exception swapFailed) {
-                if (keptOldFile) {
-                    try {
-                        Files.move(backup.toPath(), media.toPath(),
-                                StandardCopyOption.REPLACE_EXISTING);
-                    } catch (final Exception restoreFailed) {
-                        LOG.warning("Could not restore the old cached video: " + restoreFailed);
-                    }
-                }
+                restore(videoBackup, media, keptOldVideo);
+                restore(indexBackup, oldIndex, keptOldIndex);
+                restore(audioBackup, audio, keptOldAudio);
                 throw swapFailed;
             } finally {
-                //noinspection ResultOfMethodCallIgnored
-                backup.delete();
+                // After a successful swap (or a successful restore) the
+                // backups are obsolete. If the restore itself failed, the
+                // backup may be the only copy left: keep it for
+                // cleanupIntermediates() to recover on the next run.
+                if (swapped || media.isFile()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    videoBackup.delete();
+                    //noinspection ResultOfMethodCallIgnored
+                    indexBackup.delete();
+                }
+                if (swapped || audio.isFile()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    audioBackup.delete();
+                }
             }
         } catch (final OperationCancelledException e) {
             throw e;
@@ -521,19 +647,41 @@ public final class Pipeline {
             // The expired-URL retry inside downloadMedia may have written meta
             // for the higher quality already; restore the cached entry's info.
             try {
-                saveMeta(metaFile, cached);
+                saveMeta(metaFile, cached, cachedDash);
             } catch (final Exception metaRestore) {
                 LOG.warning("Could not restore cached meta: " + metaRestore);
             }
             LOG.warning("Upgrading the cached video failed, keeping it: " + e);
-            return new UpgradeOutcome(null, "Upgrade failed — keeping the cached video");
+            return new UpgradeOutcome(null, "Upgrade failed — keeping the cached video",
+                    cachedDash);
         } finally {
             // No transcription runs in the cache-hit path, so clean the
             // intermediates here.
             //noinspection ResultOfMethodCallIgnored
-            upgraded.delete();
+            upgradedVideo.delete();
             //noinspection ResultOfMethodCallIgnored
-            audioSource.delete();
+            upgradedAudio.delete();
+        }
+    }
+
+    private static void move(final File from, final File to) throws IOException {
+        try {
+            Files.move(from.toPath(), to.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(from.toPath(), to.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static void restore(final File backup, final File target, final boolean present) {
+        if (!present) {
+            return;
+        }
+        try {
+            Files.move(backup.toPath(), target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING);
+        } catch (final Exception e) {
+            LOG.warning("Could not restore " + target + ": " + e);
         }
     }
 
@@ -607,6 +755,54 @@ public final class Pipeline {
 
     private static boolean valid(final File file) {
         return file.isFile() && file.length() >= 1024;
+    }
+
+    /**
+     * Removes half-finished files from older runs, and recovers an upgrade
+     * that was killed after the old files were moved aside but before the new
+     * ones were in place. The backup is a complete file, while the upgrade
+     * temp may be a half-written download, so the backup always wins.
+     */
+    private static void cleanupIntermediates(final File cacheDir, final boolean dash) {
+        final File media = new File(cacheDir, "video.mp4");
+        if (restoreInterrupted(new File(cacheDir, "video-old.mp4"), media)) {
+            restoreInterrupted(new File(cacheDir, "video-old.mp4.idx"),
+                    new File(cacheDir, "video.mp4.idx"));
+        }
+        if (dash) {
+            restoreInterrupted(new File(cacheDir, "audio-old.m4a"),
+                    new File(cacheDir, "audio.m4a"));
+        }
+        for (final String name : List.of("audio-source.m4a", "video-source.mp4",
+                "video-upgrade.mp4", "audio-upgrade.m4a", "video-old.mp4",
+                "video-old.mp4.idx", "audio-old.m4a")) {
+            //noinspection ResultOfMethodCallIgnored
+            new File(cacheDir, name).delete();
+        }
+    }
+
+    /** @return whether the backup was moved back into place. */
+    private static boolean restoreInterrupted(final File backup, final File target) {
+        if (target.isFile() || !backup.isFile()) {
+            return false;
+        }
+        try {
+            Files.move(backup.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (final IOException e) {
+            LOG.warning("Could not restore " + target + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Drops a partially streamed pair that belongs to a different stream. */
+    private static void resetPartialStreams(final File media, final File audio) {
+        //noinspection ResultOfMethodCallIgnored
+        media.delete();
+        //noinspection ResultOfMethodCallIgnored
+        new File(media.getParentFile(), media.getName() + ".idx").delete();
+        //noinspection ResultOfMethodCallIgnored
+        audio.delete();
     }
 
     private static ProgressListener map(final ProgressListener parent,
@@ -766,9 +962,11 @@ public final class Pipeline {
         }
     }
 
-    private static void saveMeta(final File metaFile, final VideoInfo info) throws IOException {
+    private static void saveMeta(final File metaFile, final VideoInfo info, final boolean dash)
+            throws IOException {
         // Strip the dynamic bits (stream URLs) — only identity + quality data persist.
         final Properties properties = new Properties();
+        properties.setProperty("stream", dash ? "dash" : "progressive");
         properties.setProperty("id", info.id());
         properties.setProperty("title", info.title() == null ? "" : info.title());
         properties.setProperty("uploader", info.uploader() == null ? "" : info.uploader());
@@ -803,7 +1001,7 @@ public final class Pipeline {
         }
     }
 
-    private static VideoInfo readMeta(final String id, final File metaFile) {
+    private static CachedMeta readMeta(final String id, final File metaFile) {
         final Properties properties = new Properties();
         if (metaFile.isFile()) {
             try (InputStream in = Files.newInputStream(metaFile.toPath())) {
@@ -831,8 +1029,10 @@ public final class Pipeline {
             }
         }
         final int wantedHeight = (int) parseLong(properties.getProperty("wantedHeight"), 0);
-        return new VideoInfo(id, title.isBlank() ? id : title, uploader, duration, url,
+        final VideoInfo info = new VideoInfo(id, title.isBlank() ? id : title, uploader, duration, url,
                 null, null, null, height, fps, quality, heights, wantedHeight);
+        final boolean dash = "dash".equalsIgnoreCase(properties.getProperty("stream", ""));
+        return new CachedMeta(info, dash);
     }
 
     private static long parseLong(final String value, final long fallback) {
@@ -856,9 +1056,13 @@ public final class Pipeline {
         for (final File dir : dirs) {
             migrateLegacySubtitles(dir);
             final File media = new File(dir, "video.mp4");
-            if (!valid(media)) {
+            final File audio = new File(dir, "audio.m4a");
+            final CachedMeta cached = readMeta(dir.getName(), new File(dir, "meta.properties"));
+            final boolean dash = cached.dash();
+            if (!valid(media) || (dash && !valid(audio))) {
                 continue;
             }
+            final boolean videoComplete = !dash || StreamCache.isComplete(media);
             final List<GroqModel> models = new ArrayList<>();
             File subs = null;
             GroqModel newestModel = null;
@@ -876,22 +1080,28 @@ public final class Pipeline {
             if (subs == null) {
                 continue;
             }
-            final VideoInfo info = readMeta(dir.getName(), new File(dir, "meta.properties"));
+            final VideoInfo info = cached.info();
             result.add(new RecentVideo(info.id(), info.title(), info.uploader(),
                     info.qualityLabel(), info.durationSeconds(), info.canonicalUrl(),
-                    media, subs, subs.lastModified(), newestModel, models));
+                    media, dash ? audio : null, videoComplete, subs, subs.lastModified(),
+                    newestModel, models));
         }
         result.sort(Comparator.comparingLong(RecentVideo::modified).reversed());
         return result;
     }
 
     /** Result of an in-place cache upgrade attempt. */
-    private record UpgradeOutcome(VideoInfo info, String note) {
+    private record UpgradeOutcome(VideoInfo info, String note, boolean dash) {
+    }
+
+    /** Persisted identity/quality plus the cache layout (DASH pair vs progressive). */
+    private record CachedMeta(VideoInfo info, boolean dash) {
     }
 
     public record RecentVideo(String id, String title, String uploader, String qualityLabel,
-                              long durationSeconds, String url, File mediaFile, File subtitleFile,
-                              long modified, GroqModel model, List<GroqModel> models) {
+                              long durationSeconds, String url, File mediaFile, File audioFile,
+                              boolean videoComplete, File subtitleFile, long modified,
+                              GroqModel model, List<GroqModel> models) {
         /** The transcript the given cached model produced for this video. */
         public File subtitleFileFor(final GroqModel which) {
             return Pipeline.subtitleFileFor(mediaFile.getParentFile(), which);
@@ -901,7 +1111,8 @@ public final class Pipeline {
             return qualityLabel + " · " + Fmt.time(durationSeconds) + " · "
                     + (modified > 0 ? new java.text.SimpleDateFormat("MMM d",
                     java.util.Locale.getDefault()).format(new java.util.Date(modified)) : "")
-                    + (models.size() == 1 ? " · " + model.label() : "");
+                    + (models.size() == 1 ? " · " + model.label() : "")
+                    + (videoComplete ? "" : " · streaming");
         }
     }
 }

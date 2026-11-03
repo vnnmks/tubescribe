@@ -160,7 +160,14 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     // and lock screen controls) keeps working while the app is in the background.
     val player = remember {
         PlaybackHolder.start(
-            context, args.mediaPath, args.title, args.uploader, restorePositionMs
+            context,
+            args.mediaPath,
+            args.audioPath,
+            args.videoUrl,
+            args.videoComplete,
+            args.title,
+            args.uploader,
+            restorePositionMs
         )
     }
     val notificationPermission = rememberLauncherForActivityResult(

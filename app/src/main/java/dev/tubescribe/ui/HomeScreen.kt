@@ -390,14 +390,16 @@ fun HomeScreen(
             val openVideo: (Pipeline.RecentVideo, GroqModel) -> Unit = { item, chosen ->
                 val media = item.mediaFile()
                 val subs = item.subtitleFileFor(chosen)
-                if (media.isFile && media.length() >= 1024 && subs.isFile) {
+                if (item.videoComplete() && media.isFile && media.length() >= 1024 && subs.isFile) {
                     onOpenPlayer(PlayerArgs.from(item, chosen))
                 } else {
-                    // The cache vanished (cleared storage, interrupted run…):
-                    // re-fetch and re-transcribe instead of opening a broken player.
+                    // The cache vanished or the video was only partially
+                    // streamed: re-resolve (one small page fetch) and let the
+                    // pipeline reuse the existing transcript and cache ranges.
+                    // "1080p" / "1080p60" — only the leading height, never the fps.
                     val height = item.qualityLabel()
-                        .filter { c -> c.isDigit() }.toIntOrNull() ?: 720
-                    viewModel.start(item.url(), Quality.fromHeight(height, Quality.P720), model)
+                        .takeWhile { c -> c.isDigit() }.toIntOrNull() ?: 720
+                    viewModel.start(item.url(), Quality.fromHeight(height, Quality.P720), chosen)
                 }
             }
 
