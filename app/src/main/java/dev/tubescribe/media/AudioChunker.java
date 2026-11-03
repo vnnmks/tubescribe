@@ -27,7 +27,9 @@ import java.util.logging.Logger;
  *
  * <p>Chunks are cut at sample boundaries once the accumulated sample bytes
  * approach Groq's 25 MB upload limit, so even hour-long videos cost only a
- * couple of seconds of file copying here.</p>
+ * couple of seconds of file copying here. A source that is already a single
+ * audio track below that limit is returned unchanged, because Groq accepts
+ * the cached m4a as-is.</p>
  *
  * <p>Consecutive chunks are sequential: one chunk file runs from where the
  * previous file ends to its own seam, plus one tail window — there is no
@@ -77,9 +79,11 @@ public final class AudioChunker {
      * @param authEndUs   exclusive territory end (the next seam); samples from
      *                    it on belong partly to this chunk's tail region
      * @param durationUs  container duration, for progress labels only
+     * @param temporary   whether {@code file} is a private copy to delete after
+     *                    transcription; false when it is the cached source
      */
     public record Chunk(File file, long startUs, long authStartUs, long authEndUs,
-                        long durationUs) {
+                        long durationUs, boolean temporary) {
     }
 
     public static List<Chunk> split(final File media, final File cacheDir,
@@ -103,6 +107,21 @@ public final class AudioChunker {
             }
             extractor.selectTrack(track);
             final MediaFormat format = extractor.getTrackFormat(track);
+
+            // A source that is already a single audio track below the upload
+            // limit needs no remuxing at all: Groq accepts the cached m4a
+            // unchanged. This is the common DASH case, so most videos skip
+            // the sample-copy pass entirely.
+            if (media.length() <= limitBytes && isAudioOnly(extractor)) {
+                final long durationUs = sourceDurationUs(format, media);
+                if (durationUs > 0) {
+                    chunks.add(new Chunk(media, 0, 0, Long.MAX_VALUE, durationUs, false));
+                    listener.update(1.0, "Preparing audio for the cloud · 100%");
+                    LOG.info("AudioChunker: " + media.getName()
+                            + " already fits the upload limit; using it unchanged");
+                    return chunks;
+                }
+            }
 
             final ByteBuffer buffer = ByteBuffer.allocateDirect(SAMPLE_BUFFER_BYTES);
             final MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
@@ -297,7 +316,27 @@ public final class AudioChunker {
                                    final long authStartUs, final long authEndUs) throws IOException {
         muxer.stop();
         muxer.release();
-        chunks.add(new Chunk(file, startUs, authStartUs, authEndUs, queryDuration(file)));
+        chunks.add(new Chunk(file, startUs, authStartUs, authEndUs, queryDuration(file), true));
+    }
+
+    /** Container duration of the selected track, or 0 when it is unknown. */
+    private static long sourceDurationUs(final MediaFormat format, final File file) {
+        if (format.containsKey(MediaFormat.KEY_DURATION)) {
+            final long durationUs = format.getLong(MediaFormat.KEY_DURATION);
+            if (durationUs > 0) {
+                return durationUs;
+            }
+        }
+        return queryDuration(file);
+    }
+
+    /** @return whether the container holds exactly one audio track. */
+    private static boolean isAudioOnly(final MediaExtractor extractor) {
+        if (extractor.getTrackCount() != 1) {
+            return false;
+        }
+        final String mime = extractor.getTrackFormat(0).getString(MediaFormat.KEY_MIME);
+        return mime != null && mime.startsWith("audio/");
     }
 
     /** Duration of the audio track as written into the chunk's container. */

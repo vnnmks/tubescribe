@@ -402,8 +402,10 @@ public final class Pipeline {
             writeSubtitleFile(work.subtitleFile, track);
         } finally {
             for (final AudioChunker.Chunk chunk : chunks) {
-                //noinspection ResultOfMethodCallIgnored
-                chunk.file().delete();
+                if (chunk.temporary()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    chunk.file().delete();
+                }
             }
         }
     }
