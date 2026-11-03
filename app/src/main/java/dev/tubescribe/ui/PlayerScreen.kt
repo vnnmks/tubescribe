@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -72,8 +73,11 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,6 +117,7 @@ import dev.tubescribe.subs.SubtitleTrack
 import dev.tubescribe.util.Fmt
 import java.io.File
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -264,15 +269,26 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
 
     var subsOn by rememberSaveable { mutableStateOf(true) }
     var followMode by remember { mutableStateOf(FollowMode.FOLLOW) }
-    // The subtitle that was current before the latest change; its on-screen
-    // position is what IN_PLACE mode hands over to the new current subtitle.
-    var previousIndex by remember { mutableIntStateOf(-1) }
     var showMenu by remember { mutableStateOf(false) }
     var seeking by remember { mutableStateOf(false) }
     var seekTargetMs by remember { mutableLongStateOf(0L) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    // Height of the transcript box in px, measured from the list itself. The
+    // IN_PLACE runways and the anchor math are sized from it.
+    var transcriptBoxHeightPx by remember { mutableIntStateOf(0) }
+    // Where "Following in place" parks the current line: the cue's vertical
+    // center as a fraction of the transcript box. Persisted between videos so a
+    // placement chosen once is restored everywhere; first-time users start with
+    // the current line in the middle of the box.
+    var transcriptAnchor by remember {
+        mutableFloatStateOf(TubeApp.transcriptAnchor.coerceIn(0f, 1f))
+    }
+    // True only while the user drags the list (programmatic scrolls don't emit
+    // DragInteraction events, so this cleanly separates the two).
+    val userDragging by listState.interactionSource.collectIsDraggedAsState()
 
     // ------------------------------------------- draggable subtitle overlay
     var videoSize by remember { mutableStateOf(IntSize.Zero) }
@@ -317,30 +333,77 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(currentIndex, followMode) {
+    // Keeps the playing cue parked at the chosen spot. Runs on cue changes and
+    // whenever the mode/box changes, but never while the user is dragging, so a
+    // manual adjustment is not immediately undone.
+    LaunchedEffect(currentIndex, followMode, transcriptBoxHeightPx) {
+        if (followMode == FollowMode.OFF || userDragging) return@LaunchedEffect
         if (currentIndex < 0) return@LaunchedEffect
-        val previous = previousIndex
-        previousIndex = currentIndex
-        when (followMode) {
-            FollowMode.OFF -> Unit
-            FollowMode.FOLLOW -> listState.animateScrollToItem(currentIndex)
-            FollowMode.IN_PLACE -> {
-                if (previous == currentIndex) return@LaunchedEffect
-                val visible = listState.layoutInfo.visibleItemsInfo
-                val previousItem = visible.firstOrNull { it.index == previous }
-                if (previousItem == null) {
-                    // The old subtitle is completely off-screen: jump to the top.
-                    listState.animateScrollToItem(currentIndex)
-                } else {
-                    // Put the new subtitle exactly where the old one was.
-                    val currentItem = visible.firstOrNull { it.index == currentIndex }
-                    if (currentItem != null) {
-                        listState.animateScrollBy((currentItem.offset - previousItem.offset).toFloat())
-                    } else {
-                        listState.animateScrollToItem(currentIndex, -previousItem.offset)
-                    }
-                }
+        if (followMode == FollowMode.FOLLOW) {
+            listState.animateScrollToItem(currentIndex)
+            return@LaunchedEffect
+        }
+        // IN_PLACE: the list is padded with a full-height runway on both ends.
+        // Wait one frame so those runway items are laid out before measuring —
+        // otherwise the layout info below still describes the un-padded list
+        // and the cue would be looked up at the wrong position.
+        if (transcriptBoxHeightPx <= 0) return@LaunchedEffect
+        withFrameNanos { }
+        // Look the cue up by its stable key, never by index: the runway spacers
+        // shift every cue's index, and that shift is only visible after layout.
+        val cueKey = "cue-$currentIndex"
+        // Where the cue's vertical CENTER must land inside the box.
+        val target = transcriptAnchor * transcriptBoxHeightPx
+        var item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == cueKey }
+        if (item == null) {
+            // The cue is off-screen (e.g. the user seeked): teleport it to the
+            // top of the viewport, then slide it onto the anchor below.
+            listState.scrollToItem(currentIndex + 1)
+            item = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.key == cueKey } ?: return@LaunchedEffect
+        }
+        // A positive delta scrolls the content up, moving the cue's center to
+        // the target. Delta-based scrolling has no offset-clamping surprises.
+        val delta = (item.offset + item.size / 2f) - target
+        if (abs(delta) > 0.5f) listState.animateScrollBy(delta)
+    }
+
+    // Once the user finishes dragging the transcript in place mode, remember
+    // where they left the current subtitle: that vertical center becomes the
+    // anchor for this and every later video. Only a real drag (a true → false
+    // transition) persists — the initial snapshot emission must not overwrite
+    // the saved anchor before the list has laid out.
+    val liveCurrentIndex by rememberUpdatedState(currentIndex)
+    LaunchedEffect(listState, followMode, transcriptBoxHeightPx) {
+        var dragged = false
+        // Wait for the fling to settle too: the position at finger-up is not
+        // the one the user wants remembered.
+        snapshotFlow { userDragging to listState.isScrollInProgress }
+            .collect { (dragging, scrolling) ->
+            if (dragging) {
+                dragged = true
+                return@collect
             }
+            if (!dragged || scrolling) return@collect
+            // Finger-up can briefly report "idle" before the fling starts, so
+            // give the scroll a moment to either start or stay settled.
+            delay(150)
+            if (userDragging || listState.isScrollInProgress) return@collect
+            dragged = false
+            if (followMode != FollowMode.IN_PLACE || transcriptBoxHeightPx <= 0) return@collect
+            val cue = liveCurrentIndex
+            if (cue < 0) return@collect
+            // Match by key: the runway spacers shift every cue's index.
+            val cueKey = "cue-$cue"
+            // Only record a placement when the current cue is actually visible:
+            // if the user scrolled far away, that was browsing, not a placement
+            // choice, and it must not clobber the saved anchor.
+            val item = listState.layoutInfo.visibleItemsInfo
+                .firstOrNull { it.key == cueKey } ?: return@collect
+            val anchor = ((item.offset + item.size / 2f) / transcriptBoxHeightPx)
+                .coerceIn(0f, 1f)
+            transcriptAnchor = anchor
+            TubeApp.transcriptAnchor = anchor
         }
     }
 
@@ -803,14 +866,27 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                             .padding(top = 24.dp)
                     )
                 } else {
+                    val inPlace = followMode == FollowMode.IN_PLACE
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
+                            .onSizeChanged { transcriptBoxHeightPx = it.height }
                             .padding(horizontal = 10.dp)
                     ) {
-                        itemsIndexed(track.cues()) { index, cue ->
+                        // In-place mode pads the list with a runway as tall as the
+                        // transcript box on both ends, so ANY cue — including the
+                        // very first one — can be dragged to any spot in the box.
+                        if (inPlace) {
+                            item(key = "runway-start") {
+                                Spacer(Modifier.fillMaxWidth().fillParentMaxHeight())
+                            }
+                        }
+                        itemsIndexed(
+                            track.cues(),
+                            key = { index, _ -> "cue-$index" }
+                        ) { index, cue ->
                             TranscriptRow(
                                 index = index,
                                 cue = cue,
@@ -820,6 +896,11 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
                                     player.seekTo((cue.start() * 1000).toLong())
                                 }
                             )
+                        }
+                        if (inPlace) {
+                            item(key = "runway-end") {
+                                Spacer(Modifier.fillMaxWidth().fillParentMaxHeight())
+                            }
                         }
                     }
                 }

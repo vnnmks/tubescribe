@@ -100,6 +100,17 @@ object TubeApp {
             prefs.edit().putFloat("subs_cy", value).apply()
         }
 
+    /**
+     * "Following in place" anchor: the vertical center of the current transcript
+     * line as a fraction of the transcript box height (0 = top, 0.5 = middle).
+     * Kept across videos so a placement chosen once is restored everywhere.
+     */
+    var transcriptAnchor: Float
+        get() = prefs.getFloat("transcript_anchor", 0.5f)
+        set(value) {
+            prefs.edit().putFloat("transcript_anchor", value).apply()
+        }
+
     /** Settings → Caching videos: how long cached videos may live, in ms (0 = no limit). */
     var cacheRetentionMs: Long
         get() = prefs.getLong("cache_retention_ms", 7L * 24 * 60 * 60 * 1000)

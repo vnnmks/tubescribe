@@ -44,8 +44,11 @@ TubeScribe takes a YouTube link, downloads the video, transcribes the speech
    notification permission the first time
 10. Tap the label above the transcript to cycle **Not following**,
     **Following** (the current line jumps to the top) and **Following in
-    place** (the current line stays wherever you scrolled it to; it only jumps
-    to the top once it has scrolled completely out of view)
+    place**. In place mode the current line stays at the height you drag it to,
+    and the transcript can be scrolled past its own ends by up to one box
+    height, so even the first line of a video can be placed anywhere on screen.
+    The chosen position is remembered and reused for every later video; until
+    you pick one, the current line sits in the middle of the transcript
 
 ## Subtitle models
 
