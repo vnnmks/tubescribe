@@ -30,7 +30,11 @@ data class PlayerArgs(
     val audioPath: String? = null,
     /** Live video URL while the DASH video is still being streamed. */
     val videoUrl: String? = null,
-    val videoComplete: Boolean = true
+    val videoComplete: Boolean = true,
+    /** Watch-page URL of a partly cached video; its stream link is resolved on first need. */
+    val pageUrl: String? = null,
+    /** Height of the cached stream, so a lazy resolve can pick the same one (0 = unknown). */
+    val videoHeight: Int = 0
 ) {
     companion object {
         fun from(result: Pipeline.Result): PlayerArgs {
@@ -62,7 +66,9 @@ data class PlayerArgs(
             qualityLabel = recent.qualityLabel(),
             modelLabel = model.label(),
             audioPath = recent.audioFile()?.absolutePath,
-            videoComplete = recent.videoComplete()
+            videoComplete = recent.videoComplete(),
+            pageUrl = if (recent.videoComplete()) null else recent.url(),
+            videoHeight = recent.qualityLabel().takeWhile { it.isDigit() }.toIntOrNull() ?: 0
         )
     }
 }

@@ -38,7 +38,7 @@ public final class StreamCacheDataSource implements DataSource {
             Pattern.compile("bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)", Pattern.CASE_INSENSITIVE);
 
     private final StreamCache cache;
-    private final String url;
+    private final StreamUrl streamUrl;
     private final List<TransferListener> listeners = new CopyOnWriteArrayList<>();
 
     private DataSpec dataSpec;
@@ -50,8 +50,12 @@ public final class StreamCacheDataSource implements DataSource {
     private boolean opened;
 
     public StreamCacheDataSource(final StreamCache cache, final String url) {
+        this(cache, StreamUrl.fixed(url));
+    }
+
+    public StreamCacheDataSource(final StreamCache cache, final StreamUrl streamUrl) {
         this.cache = cache;
-        this.url = url;
+        this.streamUrl = streamUrl;
     }
 
     @Override
@@ -139,17 +143,29 @@ public final class StreamCacheDataSource implements DataSource {
         if (cache.total() > 0 && position >= cache.total()) {
             return;
         }
-        final DataSource source = newUpstreamFactory().createDataSource();
-        for (final TransferListener listener : listeners) {
-            source.addTransferListener(listener);
-        }
         final long length = remaining == Long.MAX_VALUE ? C.LENGTH_UNSET : remaining;
-        final DataSpec spec = new DataSpec(dataSpec.uri, position, length);
-        try {
-            source.open(spec);
-        } catch (final IOException e) {
-            source.close();
-            throw e;
+        // The URL is only resolved here, on the first byte that is not cached.
+        String target = streamUrl.get();
+        boolean refreshed = false;
+        DataSource source;
+        while (true) {
+            source = newUpstreamFactory().createDataSource();
+            for (final TransferListener listener : listeners) {
+                source.addTransferListener(listener);
+            }
+            try {
+                source.open(new DataSpec(Uri.parse(target), position, length));
+                break;
+            } catch (final IOException e) {
+                source.close();
+                // A stale link (403/410) gets one fresh URL before giving up.
+                final String fresh = !refreshed && isExpired(e) ? streamUrl.refresh() : null;
+                if (fresh == null) {
+                    throw e;
+                }
+                refreshed = true;
+                target = fresh;
+            }
         }
         upstream = source;
         final Map<String, List<String>> headers = source.getResponseHeaders();
@@ -165,8 +181,24 @@ public final class StreamCacheDataSource implements DataSource {
             }
         }
         if (total > 0) {
+            final long known = cache.total();
+            if (known > 0 && known != total) {
+                // The cached bytes came from another stream; mixing them with
+                // this one would corrupt the file.
+                closeUpstream();
+                throw new IOException("YouTube now serves a different stream than the cached "
+                        + "part of this video. Fetch it again from its link to refresh the cache.");
+            }
             cache.setTotal(total);
         }
+    }
+
+    private static boolean isExpired(final IOException e) {
+        if (e instanceof HttpDataSource.InvalidResponseCodeException) {
+            final int code = ((HttpDataSource.InvalidResponseCodeException) e).responseCode;
+            return code == 403 || code == 410;
+        }
+        return false;
     }
 
     private RandomAccessFile file() throws IOException {
@@ -309,13 +341,17 @@ public final class StreamCacheDataSource implements DataSource {
     /** One factory per track; all data sources share the same range cache. */
     public static final class Factory implements DataSource.Factory {
         private final StreamCache cache;
-        private final String url;
+        private final StreamUrl url;
 
         public Factory(final File dataFile, final String url) {
+            this(new StreamCache(dataFile), StreamUrl.fixed(url));
+        }
+
+        public Factory(final File dataFile, final StreamUrl url) {
             this(new StreamCache(dataFile), url);
         }
 
-        public Factory(final StreamCache cache, final String url) {
+        public Factory(final StreamCache cache, final StreamUrl url) {
             this.cache = cache;
             this.url = url;
         }

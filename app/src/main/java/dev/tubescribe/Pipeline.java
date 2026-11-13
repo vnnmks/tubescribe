@@ -61,6 +61,9 @@ public final class Pipeline {
      */
     private static final long PREFETCH_BYTES = 8L * 1024 * 1024;
 
+    /** Cached prefix a partly streamed entry needs before the player may open on it directly. */
+    private static final long MIN_RESUME_PREFIX_BYTES = 1024L * 1024;
+
     private final File cacheRoot;
     private final List<String> groqKeys;
     private final GroqModel whisperModel;
@@ -1276,6 +1279,15 @@ public final class Pipeline {
         /** The transcript the given cached model produced for this video. */
         public File subtitleFileFor(final GroqModel which) {
             return Pipeline.subtitleFileFor(mediaFile.getParentFile(), which);
+        }
+
+        /**
+         * A partly streamed DASH entry whose cached prefix is enough to open the
+         * player right away; the rest is fetched while it plays.
+         */
+        public boolean resumable() {
+            return !videoComplete && audioFile != null && audioFile.isFile()
+                    && new StreamCache(mediaFile).contiguousEnd() >= MIN_RESUME_PREFIX_BYTES;
         }
 
         public String metaLine() {

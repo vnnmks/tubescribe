@@ -107,6 +107,7 @@ import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import dev.tubescribe.PlaybackHolder
@@ -168,6 +169,8 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
             args.audioPath,
             args.videoUrl,
             args.videoComplete,
+            args.pageUrl,
+            args.videoHeight,
             args.title,
             args.uploader,
             restorePositionMs
@@ -301,6 +304,22 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    // Streaming the uncached rest of a video can fail (offline, the video
+    // changed on YouTube); the cached part keeps playing, so just say why.
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        "Playback stopped: " + (error.cause?.message ?: error.errorCodeName)
+                    )
+                }
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
 
     // Height of the transcript box in px, measured from the list itself. The
     // IN_PLACE runways and the anchor math are sized from it.

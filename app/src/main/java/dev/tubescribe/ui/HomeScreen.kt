@@ -390,11 +390,16 @@ fun HomeScreen(
             val openVideo: (Pipeline.RecentVideo, GroqModel) -> Unit = { item, chosen ->
                 val media = item.mediaFile()
                 val subs = item.subtitleFileFor(chosen)
-                if (item.videoComplete() && media.isFile && media.length() >= 1024 && subs.isFile) {
+                // A partly streamed video opens right away from its cached
+                // prefix; the player resolves the stream link only when it
+                // reaches bytes that are not on disk.
+                val playable = media.isFile && media.length() >= 1024 && subs.isFile &&
+                    (item.videoComplete() || item.resumable())
+                if (playable) {
                     onOpenPlayer(PlayerArgs.from(item, chosen))
                 } else {
-                    // The cache vanished or the video was only partially
-                    // streamed: re-resolve (one small page fetch) and let the
+                    // The cache vanished or too little of the video is on
+                    // disk: re-resolve (one small page fetch) and let the
                     // pipeline reuse the existing transcript and cache ranges.
                     // "1080p" / "1080p60" — only the leading height, never the fps.
                     val height = item.qualityLabel()

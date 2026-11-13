@@ -17,7 +17,9 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import dev.tubescribe.media.LazyStreamUrl
 import dev.tubescribe.media.StreamCacheDataSource
+import dev.tubescribe.media.StreamUrl
 import java.io.File
 
 /**
@@ -61,6 +63,8 @@ object PlaybackHolder {
         audioPath: String?,
         videoUrl: String?,
         videoComplete: Boolean,
+        pageUrl: String?,
+        videoHeight: Int,
         title: String,
         artist: String,
         startMs: Long
@@ -70,16 +74,23 @@ object PlaybackHolder {
         val videoFile = File(mediaPath)
         // While a DASH video is still being streamed, its local file is a
         // sparse prefix; the range data source fills the rest on demand.
+        // A known stream URL is used as is; otherwise the watch-page URL is
+        // resolved lazily, only once playback needs bytes that are not cached.
         // A complete entry (and every progressive entry) plays straight from
         // disk. Audio is always complete, so it is a plain file source.
-        val liveUrl = if (videoComplete) null else videoUrl?.takeIf { it.isNotBlank() }
+        val liveUrl: StreamUrl? = when {
+            videoComplete -> null
+            !videoUrl.isNullOrBlank() -> StreamUrl.fixed(videoUrl)
+            !pageUrl.isNullOrBlank() -> LazyStreamUrl(pageUrl, videoHeight)
+            else -> null
+        }
         val videoFactory = if (liveUrl != null) {
             StreamCacheDataSource.Factory(videoFile, liveUrl)
         } else {
             DefaultDataSource.Factory(app)
         }
         val videoItem = MediaItem.Builder()
-            .setUri(if (liveUrl != null) Uri.parse(liveUrl) else Uri.fromFile(videoFile))
+            .setUri(Uri.fromFile(videoFile))
             .setMimeType(MimeTypes.VIDEO_MP4)
             .setMediaMetadata(
                 MediaMetadata.Builder()
