@@ -165,6 +165,33 @@ object TubeApp {
     }
 
     /**
+     * Where the user left off in a cached video, in ms (0 = start from the
+     * beginning). Only meaningful while the video's cache entry exists; the
+     * position is dropped together with the entry by [CacheCleaner].
+     */
+    fun playbackPosition(id: String): Long {
+        if (!File(cacheDir, id).isDirectory) {
+            return 0L
+        }
+        return prefs.getLong("play_pos_$id", 0L).coerceAtLeast(0L)
+    }
+
+    /** Remembers the playback position; a non-positive value forgets it. */
+    fun setPlaybackPosition(id: String, positionMs: Long) {
+        if (positionMs <= 0L) {
+            clearPlaybackPosition(id)
+        } else if (prefs.getLong("play_pos_$id", 0L) != positionMs) {
+            prefs.edit().putLong("play_pos_$id", positionMs).apply()
+        }
+    }
+
+    fun clearPlaybackPosition(id: String) {
+        if (prefs.contains("play_pos_$id")) {
+            prefs.edit().remove("play_pos_$id").apply()
+        }
+    }
+
+    /**
      * Debug-only override for the audio chunk byte limit (0 = production
      * limit). A small forced limit makes [dev.tubescribe.media.AudioChunker]
      * split even short audio into many chunks, so seam handling can be

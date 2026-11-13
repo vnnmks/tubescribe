@@ -153,8 +153,11 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     val fullscreen = if (autoRotate) isLandscape else manualFullscreen
 
     // Keep the playback position across activity recreation (e.g. a rotation
-    // on devices that still recreate despite configChanges).
-    var restorePositionMs by rememberSaveable { mutableLongStateOf(0L) }
+    // on devices that still recreate despite configChanges). A fresh open
+    // resumes from where the user left off in this video, if it is still cached.
+    var restorePositionMs by rememberSaveable {
+        mutableLongStateOf(TubeApp.playbackPosition(args.videoId))
+    }
 
     // The player lives in PlaybackHolder so its MediaSession (notification shade
     // and lock screen controls) keeps working while the app is in the background.
@@ -183,6 +186,7 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     }
     DisposableEffect(Unit) {
         onDispose {
+            rememberPosition(args.videoId, player.currentPosition, player.duration)
             PlaybackHolder.stop(context)
             // Never leave the rest of the app locked in the player's
             // fullscreen orientation or with hidden system bars.
@@ -245,9 +249,18 @@ fun PlayerScreen(args: PlayerArgs, onBack: () -> Unit) {
     var playing by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     LaunchedEffect(player) {
+        // Start the clock now so the first tick can't overwrite the saved
+        // position before the initial seek has been applied.
+        var lastPersistMs = System.currentTimeMillis()
         while (true) {
             positionMs = player.currentPosition
             restorePositionMs = positionMs
+            // Also persist periodically so a process kill still resumes close by.
+            val now = System.currentTimeMillis()
+            if (now - lastPersistMs >= 5_000) {
+                lastPersistMs = now
+                rememberPosition(args.videoId, positionMs, player.duration)
+            }
             playing = player.isPlaying
             val duration = player.duration
             if (duration > 0) durationMs = duration
@@ -1059,6 +1072,15 @@ private fun rememberAutoRotateEnabled(): Boolean {
         }
     }
     return enabled
+}
+
+/** Within this much of the end a video counts as finished and restarts from 0. */
+private const val RESUME_END_MARGIN_MS = 5_000L
+
+/** Stores where the user left off; a finished video forgets its position. */
+private fun rememberPosition(videoId: String, positionMs: Long, durationMs: Long) {
+    val finished = durationMs > 0 && positionMs >= durationMs - RESUME_END_MARGIN_MS
+    TubeApp.setPlaybackPosition(videoId, if (finished) 0L else positionMs)
 }
 
 private fun shareSubtitles(context: Context, kind: String, videoId: String, track: SubtitleTrack) {

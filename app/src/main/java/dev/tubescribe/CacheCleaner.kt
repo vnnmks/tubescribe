@@ -225,7 +225,9 @@ object CacheCleaner {
     /** @return whether the entry disappeared (it may already be gone). */
     private fun deleteEntry(dir: File): Boolean {
         val gone = runCatching { dir.deleteRecursively() }.getOrDefault(false)
-        if (!gone) {
+        if (gone) {
+            TubeApp.clearPlaybackPosition(dir.name)
+        } else {
             LOG.warning("Could not delete cached entry " + dir)
         }
         return gone
