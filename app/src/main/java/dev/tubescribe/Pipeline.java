@@ -27,6 +27,7 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
@@ -505,7 +506,7 @@ public final class Pipeline {
             // A refreshed resolve may land on a progressive stream (or none);
             // never fall through to a null URL on the retry.
             final String videoUrl = info.videoUrl();
-            if (videoUrl == null || videoUrl.isBlank()) {
+            if (videoUrl == null || videoUrl.trim().isEmpty()) {
                 throw new MediaException(attempt == 0
                         ? "YouTube did not provide a video stream URL."
                         : "YouTube no longer offers a separate video stream.");
@@ -813,7 +814,7 @@ public final class Pipeline {
         try {
             if (marker.isFile()) {
                 model = GroqModel.fromId(new String(Files.readAllBytes(marker.toPath()),
-                        java.nio.charset.StandardCharsets.UTF_8).strip());
+                        java.nio.charset.StandardCharsets.UTF_8).trim());
             }
             if (model == null) {
                 return;
@@ -852,7 +853,7 @@ public final class Pipeline {
             restoreInterrupted(new File(cacheDir, "audio-old.m4a"),
                     new File(cacheDir, "audio.m4a"));
         }
-        for (final String name : List.of("audio-source.m4a", "video-source.mp4",
+        for (final String name : Arrays.asList("audio-source.m4a", "video-source.mp4",
                 "video-upgrade.mp4", "audio-upgrade.m4a", "video-old.mp4",
                 "video-old.mp4.idx", "audio-old.m4a")) {
             //noinspection ResultOfMethodCallIgnored
@@ -1100,12 +1101,12 @@ public final class Pipeline {
                     : Math.max(0.0, Math.min(1.0, fraction));
             if (mediaBranch) {
                 media = Math.max(media, local);
-                if (message != null && !message.isBlank()) {
+                if (message != null && !message.trim().isEmpty()) {
                     mediaMessage = message;
                 }
             } else {
                 audio = Math.max(audio, local);
-                if (message != null && !message.isBlank()) {
+                if (message != null && !message.trim().isEmpty()) {
                     audioMessage = message;
                 }
             }
@@ -1194,7 +1195,7 @@ public final class Pipeline {
         final List<Integer> heights = new ArrayList<>();
         for (final String part : properties.getProperty("heights", "").split(",")) {
             try {
-                final int value = Integer.parseInt(part.strip());
+                final int value = Integer.parseInt(part.trim());
                 if (value > 0 && !heights.contains(value)) {
                     heights.add(value);
                 }
@@ -1203,7 +1204,7 @@ public final class Pipeline {
             }
         }
         final int wantedHeight = (int) parseLong(properties.getProperty("wantedHeight"), 0);
-        final VideoInfo info = new VideoInfo(id, title.isBlank() ? id : title, uploader, duration, url,
+        final VideoInfo info = new VideoInfo(id, title.trim().isEmpty() ? id : title, uploader, duration, url,
                 null, null, null, height, fps, quality, heights, wantedHeight);
         final boolean dash = "dash".equalsIgnoreCase(properties.getProperty("stream", ""));
         return new CachedMeta(info, dash);

@@ -18,6 +18,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -291,10 +292,16 @@ public final class StreamCacheDataSource implements DataSource {
                 .setConnectTimeoutMs(20_000)
                 .setReadTimeoutMs(60_000)
                 .setAllowCrossProtocolRedirects(true)
-                .setDefaultRequestProperties(Map.of(
-                        "Referer", "https://www.youtube.com/",
-                        "Accept", "*/*",
-                        "Accept-Language", "en-US,en;q=0.9"));
+                .setDefaultRequestProperties(defaultUpstreamHeaders());
+    }
+
+    /** Plain map, because {@code Map.of} is only available from Android 11. */
+    private static Map<String, String> defaultUpstreamHeaders() {
+        final Map<String, String> headers = new HashMap<>();
+        headers.put("Referer", "https://www.youtube.com/");
+        headers.put("Accept", "*/*");
+        headers.put("Accept-Language", "en-US,en;q=0.9");
+        return headers;
     }
 
     /**

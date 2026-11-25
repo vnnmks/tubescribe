@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -14,13 +15,13 @@ public final class SubtitleTrack {
 
     public SubtitleTrack(final List<SubtitleCue> cues) {
         final List<SubtitleCue> copy = new ArrayList<>(cues);
-        copy.removeIf(cue -> cue.text().isBlank());
+        copy.removeIf(cue -> cue.text().trim().isEmpty());
         copy.sort(SubtitleCue.byStart());
-        this.cues = List.copyOf(copy);
+        this.cues = Collections.unmodifiableList(copy);
     }
 
     public static SubtitleTrack empty() {
-        return new SubtitleTrack(List.of());
+        return new SubtitleTrack(Collections.emptyList());
     }
 
     public List<SubtitleCue> cues() {
@@ -143,9 +144,9 @@ public final class SubtitleTrack {
                     if (body.length() > 0) {
                         body.append(' ');
                     }
-                    body.append(lines[i].strip());
+                    body.append(lines[i].trim());
                 }
-                final String bodyText = body.toString().replaceAll("<[^>]+>", "").strip();
+                final String bodyText = body.toString().replaceAll("<[^>]+>", "").trim();
                 if (!bodyText.isEmpty()) {
                     parsed.add(new SubtitleCue(start, end, bodyText));
                 }
@@ -174,15 +175,15 @@ public final class SubtitleTrack {
     }
 
     private static double parseTime(final String value) {
-        final String cleaned = value.strip().replace(',', '.');
+        final String cleaned = value.trim().replace(',', '.');
         final String[] parts = cleaned.split(":");
         if (parts.length == 3) {
-            return Integer.parseInt(parts[0].strip()) * 3600.0
-                    + Integer.parseInt(parts[1].strip()) * 60.0
-                    + Double.parseDouble(parts[2].strip());
+            return Integer.parseInt(parts[0].trim()) * 3600.0
+                    + Integer.parseInt(parts[1].trim()) * 60.0
+                    + Double.parseDouble(parts[2].trim());
         }
         if (parts.length == 2) {
-            return Integer.parseInt(parts[0].strip()) * 60.0 + Double.parseDouble(parts[1].strip());
+            return Integer.parseInt(parts[0].trim()) * 60.0 + Double.parseDouble(parts[1].trim());
         }
         return Double.parseDouble(cleaned);
     }

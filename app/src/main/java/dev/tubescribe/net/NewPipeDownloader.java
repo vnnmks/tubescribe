@@ -11,6 +11,7 @@ import org.schabi.newpipe.extractor.downloader.Request;
 import org.schabi.newpipe.extractor.downloader.Response;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -102,7 +103,7 @@ public final class NewPipeDownloader extends Downloader {
     }
 
     static List<Cookie> emptyCookies() {
-        return List.of();
+        return Collections.emptyList();
     }
 
     static HttpUrl parse(final String url) {

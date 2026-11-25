@@ -2,6 +2,8 @@ package dev.tubescribe.subs;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -58,14 +60,14 @@ public final class CueBuilder {
     private static final double LINE_CONJUNCTION_PENALTY = 2.0;
     private static final double LINE_BAD_END_PENALTY = 8.0;
 
-    private static final Set<String> STOPWORDS = Set.of(
+    private static final Set<String> STOPWORDS = setOf(
             "the", "a", "an", "to", "of", "in", "on", "at", "for", "from",
             "by", "with", "as", "is", "are", "was", "were", "be", "been",
             "being", "that", "this", "these", "those", "it", "its", "his",
             "her", "their", "our", "your", "my", "into", "over", "under",
             "between", "through", "during", "without", "within", "about",
             "after", "before", "against", "among", "around", "upon", "via");
-    private static final Set<String> CONJUNCTIONS = Set.of(
+    private static final Set<String> CONJUNCTIONS = setOf(
             "and", "but", "that", "which", "who", "whom", "whose", "because",
             "although", "though", "while", "whereas", "or", "nor", "yet",
             "so", "if", "when", "where", "as");
@@ -73,7 +75,7 @@ public final class CueBuilder {
      * starting with a determiner or the rest of a phrase. Prepositions such
      * as "in" and "of" are acceptable line endings for subtitles and are not
      * listed here. */
-    private static final Set<String> BAD_LINE_ENDINGS = Set.of(
+    private static final Set<String> BAD_LINE_ENDINGS = setOf(
             "the", "a", "an", "this", "that", "these", "those",
             "my", "your", "his", "her", "its", "our", "their",
             "to", "and", "but", "or", "nor", "yet", "so", "because",
@@ -86,6 +88,11 @@ public final class CueBuilder {
             ".*[,;:][\"')\\]\u201d\u2019]?$");
 
     private CueBuilder() {
+    }
+
+    /** Immutable string set for the word lists; {@code Set.of} needs API 30. */
+    private static Set<String> setOf(final String... values) {
+        return Collections.unmodifiableSet(new HashSet<>(Arrays.asList(values)));
     }
 
     /** One timed word from whisper's word-level timestamps. */
@@ -106,7 +113,7 @@ public final class CueBuilder {
                                                final double minCueSeconds) {
         final List<Token> tokens = tokenize(words);
         if (tokens.isEmpty()) {
-            return List.of();
+            return Collections.emptyList();
         }
         final List<SubtitleCue> built = new ArrayList<>();
         int spanStart = 0;
@@ -131,18 +138,18 @@ public final class CueBuilder {
                                                 final String rawText) {
         final String text = clean(rawText);
         if (text.isEmpty() || duration <= 0.05) {
-            return List.of();
+            return Collections.emptyList();
         }
         final String[] words = text.split(" ");
         if (words.length == 0) {
-            return List.of();
+            return Collections.emptyList();
         }
         int totalChars = 0;
         for (final String word : words) {
             totalChars += word.length();
         }
         if (totalChars == 0) {
-            return List.of();
+            return Collections.emptyList();
         }
         final List<WordSpan> synthetic = new ArrayList<>(words.length);
         double cursor = start;
@@ -167,15 +174,15 @@ public final class CueBuilder {
 
     private static List<Token> tokenize(final List<WordSpan> words) {
         if (words == null || words.isEmpty()) {
-            return List.of();
+            return Collections.emptyList();
         }
         final List<Token> tokens = new ArrayList<>(words.size());
         for (final WordSpan word : words) {
-            if (word == null || word.word() == null || word.word().isBlank()) {
+            if (word == null || word.word() == null || word.word().trim().isEmpty()) {
                 continue;
             }
             final String raw = word.word();
-            final String text = raw.strip();
+            final String text = raw.trim();
             if (text.isEmpty()) {
                 continue;
             }
@@ -417,10 +424,10 @@ public final class CueBuilder {
                 .replace('\n', ' ')
                 .replace('\r', ' ')
                 .replaceAll("\\s+", " ")
-                .strip();
+                .trim();
         // Strip leading speaker dashes and decorative music notes.
         text = text.replaceAll("^[-\u2013\u2014]+\\s*", "");
-        text = text.replaceAll("^[\u266a\u266b\\s]+", "").strip();
+        text = text.replaceAll("^[\u266a\u266b\\s]+", "").trim();
         if (text.isEmpty() || text.equals("\u266a") || NON_SPEECH.matcher(text).matches()) {
             return "";
         }
@@ -429,7 +436,7 @@ public final class CueBuilder {
         final String withoutMarkers = text
                 .replaceAll("(?i)\\[(music|applause|laughter|blank_audio|silence|noise)\\]", "")
                 .replaceAll("(?i)\\((music|applause|laughter|silence|noise)\\)", "")
-                .strip();
+                .trim();
         return withoutMarkers.isEmpty() ? "" : text;
     }
 
@@ -460,7 +467,7 @@ public final class CueBuilder {
      */
     public static String balanceLines(final String rawText) {
         final String text = rawText == null ? ""
-                : rawText.strip().replaceAll("\\s+", " ");
+                : rawText.trim().replaceAll("\\s+", " ");
         if (text.isEmpty()) {
             return "";
         }

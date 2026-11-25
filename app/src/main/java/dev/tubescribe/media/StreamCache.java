@@ -217,10 +217,10 @@ public final class StreamCache {
             }
             String line;
             while ((line = in.readLine()) != null) {
-                line = line.strip();
+                line = line.trim();
                 if (line.startsWith("total=")) {
                     try {
-                        loadedTotal = Long.parseLong(line.substring(6).strip());
+                        loadedTotal = Long.parseLong(line.substring(6).trim());
                     } catch (final NumberFormatException ignored) {
                         loadedTotal = -1;
                     }
@@ -230,8 +230,8 @@ public final class StreamCache {
                         continue;
                     }
                     try {
-                        final long start = Long.parseLong(line.substring(0, dash).strip());
-                        final long end = Long.parseLong(line.substring(dash + 1).strip());
+                        final long start = Long.parseLong(line.substring(0, dash).trim());
+                        final long end = Long.parseLong(line.substring(dash + 1).trim());
                         if (start >= 0 && end > start) {
                             loaded.put(start, end);
                         }

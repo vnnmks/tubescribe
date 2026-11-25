@@ -114,7 +114,7 @@ public final class MediaDownloader {
                     final String detail = response.body() == null
                             ? "" : truncate(response.body().string(), 300);
                     throw new MediaException("Media download failed with HTTP " + code
-                            + (detail.isBlank() ? "" : ": " + detail)
+                            + (detail.trim().isEmpty() ? "" : ": " + detail)
                             + ". The stream URL may have expired; try the link again.");
                 }
                 if (code == 200) {
@@ -230,7 +230,7 @@ public final class MediaDownloader {
     }
 
     private static String truncate(final String value, final int max) {
-        final String cleaned = value.replaceAll("\\s+", " ").strip();
+        final String cleaned = value.replaceAll("\\s+", " ").trim();
         return cleaned.length() <= max ? cleaned : cleaned.substring(0, max) + "…";
     }
 

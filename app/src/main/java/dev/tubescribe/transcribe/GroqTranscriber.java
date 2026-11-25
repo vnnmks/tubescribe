@@ -19,6 +19,7 @@ import okhttp3.Response;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -230,7 +231,7 @@ public final class GroqTranscriber {
         }
         final StringBuilder tail = new StringBuilder();
         for (int i = cues.size() - 1; i >= 0 && tail.length() < 2 * PROMPT_CHARS; i--) {
-            final String text = cues.get(i).text().strip();
+            final String text = cues.get(i).text().trim();
             if (text.isEmpty()) {
                 continue;
             }
@@ -239,7 +240,7 @@ public final class GroqTranscriber {
             }
             tail.insert(0, text);
         }
-        final String result = tail.toString().strip();
+        final String result = tail.toString().trim();
         if (result.isEmpty()) {
             return null;
         }
@@ -278,7 +279,7 @@ public final class GroqTranscriber {
                         .addFormDataPart("timestamp_granularities[]", "word")
                         .addFormDataPart("temperature", "0")
                         .addFormDataPart("file", "audio.m4a", fileBody);
-                if (prompt != null && !prompt.isBlank()) {
+                if (prompt != null && !prompt.trim().isEmpty()) {
                     form.addFormDataPart("prompt", prompt);
                 }
                 final Request request = new Request.Builder()
@@ -381,7 +382,7 @@ public final class GroqTranscriber {
             final JsonObject json = JsonParser.object().from(body);
             final JsonObject error = json.getObject("error");
             final String message = error == null ? null : error.getString("message", null);
-            return message == null || message.isBlank()
+            return message == null || message.trim().isEmpty()
                     ? (body.length() > 300 ? body.substring(0, 300) : body) : message;
         } catch (final com.grack.nanojson.JsonParserException e) {
             return body.length() > 300 ? body.substring(0, 300) : body;
@@ -432,7 +433,7 @@ public final class GroqTranscriber {
                 // first chunk (a floor at the file start would drop it); a
                 // wordless tail chunk then contributes nothing but its
                 // retranscribed owner still covers the audio it trimmed.
-                final String text = json.getString("text", "").strip();
+                final String text = json.getString("text", "").trim();
                 final double duration = json.getDouble("duration", 30.0);
                 if (!text.isEmpty() && startFloorSec < offset && acceptedEndSec <= offset) {
                     cues.add(new SubtitleCue(offset, offset + duration, text));
@@ -461,7 +462,7 @@ public final class GroqTranscriber {
                     } else if (end > startFloorSec + BRIDGE_MIN_EXTEND_SEC
                             && end > bridgeEnd) {
                         bridgeEnd = end;
-                        bridgeText = segment.getString("text", "").strip();
+                        bridgeText = segment.getString("text", "").trim();
                     }
                 }
                 double clipped = bridgeEnd < 0 ? -1
@@ -513,7 +514,7 @@ public final class GroqTranscriber {
                 final JsonObject segment = segments.getObject(i);
                 final double start = offset + Math.max(0, segment.getDouble("start", 0));
                 final double end = offset + Math.max(0, segment.getDouble("end", 0));
-                final String text = segment.getString("text", "").strip();
+                final String text = segment.getString("text", "").trim();
                 if (text.isEmpty()) {
                     continue;
                 }
@@ -544,7 +545,7 @@ public final class GroqTranscriber {
             // unreadably. One continuous pass keeps phrases whole, and the
             // spoken words still drive cue timing directly.
             final List<dev.tubescribe.subs.CueBuilder.WordSpan> ownedWords = ownedFrom < 0
-                    ? List.of()
+                    ? Collections.emptyList()
                     : trimPhantomWords(
                             wordSpans(words, offset, ownedFrom - 0.02, ownedTo + 0.02),
                             chunkEndSec);
@@ -559,7 +560,7 @@ public final class GroqTranscriber {
                     final JsonObject segment = segments.getObject(i);
                     final double start = offset + Math.max(0, segment.getDouble("start", 0));
                     final double end = offset + Math.max(0, segment.getDouble("end", 0));
-                    final String text = segment.getString("text", "").strip();
+                    final String text = segment.getString("text", "").trim();
                     cues.addAll(dev.tubescribe.subs.CueBuilder.fromSegment(
                             start, Math.max(end, start + 0.4) - start, text));
                 }
@@ -601,7 +602,7 @@ public final class GroqTranscriber {
 
     /** Short single-line text prefix for debug logs. */
     private static String clip(final String text, final int max) {
-        final String flat = text.replaceAll("\\s+", " ").strip();
+        final String flat = text.replaceAll("\\s+", " ").trim();
         return flat.length() <= max ? flat : flat.substring(0, max) + "…";
     }
 

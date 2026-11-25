@@ -50,7 +50,7 @@ public final class LazyStreamUrl implements StreamUrl {
                     + e.getMessage(), e);
         }
         final String videoUrl = info.videoUrl();
-        if (!info.requiresMerge() || videoUrl == null || videoUrl.isBlank()
+        if (!info.requiresMerge() || videoUrl == null || videoUrl.trim().isEmpty()
                 || (expectedHeight > 0 && info.height() != expectedHeight)) {
             throw new IOException("YouTube no longer offers the stream this video was cached "
                     + "from. Fetch it again from its link to refresh the cache.");

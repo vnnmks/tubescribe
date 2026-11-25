@@ -14,6 +14,7 @@ import okhttp3.Response;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -58,19 +59,28 @@ public final class InnertubeClient {
         }
     }
 
-    private static final List<ClientProfile> CLIENTS = List.of(
+    private static final List<ClientProfile> CLIENTS = Arrays.asList(
             new ClientProfile("ANDROID", "20.10.38",
                     "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
-                    java.util.Map.of("androidSdkVersion", 34)),
+                    profileMap("androidSdkVersion", 34)),
             new ClientProfile("IOS", "20.10.4",
                     "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)",
-                    java.util.Map.of("deviceMake", "Apple", "deviceModel", "iPhone16,2",
+                    profileMap("deviceMake", "Apple", "deviceModel", "iPhone16,2",
                             "osName", "iPhone", "osVersion", "17.5.1.21F90")),
             new ClientProfile("VISIONOS", "1.02",
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
                             + "(KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-                    java.util.Map.of("deviceMake", "Apple", "deviceModel", "RealityDevice17,1",
+                    profileMap("deviceMake", "Apple", "deviceModel", "RealityDevice17,1",
                             "osName", "visionOS", "osVersion", "26.5.23O471")));
+
+    /** Small string-keyed map for the client profiles; {@code Map.of} needs API 30. */
+    private static java.util.Map<String, Object> profileMap(final Object... entries) {
+        final java.util.Map<String, Object> map = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < entries.length; i += 2) {
+            map.put((String) entries[i], entries[i + 1]);
+        }
+        return map;
+    }
 
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)

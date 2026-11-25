@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.security.KeyStore;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -46,14 +47,14 @@ public final class GroqKeyStore {
     /** @return the configured keys in order; empty when none have been saved yet. */
     public static synchronized List<String> keys() {
         if (!file.isFile()) {
-            return List.of();
+            return Collections.emptyList();
         }
         try {
             final byte[] blob = Base64.decode(Files.readAllBytes(file.toPath()), Base64.NO_WRAP);
             final byte[] plain = decrypt(blob);
             final List<String> keys = new ArrayList<>();
             for (final String line : new String(plain, StandardCharsets.UTF_8).split("\r\n|\n")) {
-                final String value = line.strip();
+                final String value = line.trim();
                 if (!value.isEmpty() && !value.startsWith("#")) {
                     keys.add(value);
                 }
@@ -68,7 +69,7 @@ public final class GroqKeyStore {
     public static synchronized void save(final List<String> keys) throws IOException {
         final StringBuilder text = new StringBuilder();
         for (final String key : keys) {
-            final String value = key == null ? "" : key.strip();
+            final String value = key == null ? "" : key.trim();
             if (!value.isEmpty()) {
                 text.append(value).append('\n');
             }

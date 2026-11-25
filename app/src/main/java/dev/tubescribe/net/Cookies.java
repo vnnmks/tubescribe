@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.logging.Level;
@@ -24,7 +25,7 @@ public final class Cookies {
 
     public static Loaded load(final Path file) throws IOException {
         if (file == null) {
-            return new Loaded(List.of(), 0);
+            return new Loaded(Collections.emptyList(), 0);
         }
         if (!Files.isRegularFile(file)) {
             throw new IOException("Cookies file not found: " + file);
@@ -34,7 +35,7 @@ public final class Cookies {
         int youtube = 0;
         int skipped = 0;
         for (int lineNumber = 0; lineNumber < lines.size(); lineNumber++) {
-            String line = lines.get(lineNumber).strip();
+            String line = lines.get(lineNumber).trim();
             if (line.isEmpty()) {
                 continue;
             }
@@ -51,12 +52,12 @@ public final class Cookies {
                 continue;
             }
             try {
-                final String domain = fields[0].strip();
-                final boolean includeSubdomains = Boolean.parseBoolean(fields[1].strip());
-                final String path = fields[2].isBlank() ? "/" : fields[2].strip();
-                final boolean secure = Boolean.parseBoolean(fields[3].strip());
-                final long expires = Long.parseLong(fields[4].strip());
-                final String name = fields[5].strip();
+                final String domain = fields[0].trim();
+                final boolean includeSubdomains = Boolean.parseBoolean(fields[1].trim());
+                final String path = fields[2].trim().isEmpty() ? "/" : fields[2].trim();
+                final boolean secure = Boolean.parseBoolean(fields[3].trim());
+                final long expires = Long.parseLong(fields[4].trim());
+                final String name = fields[5].trim();
                 final String value = fields[6];
                 if (domain.isEmpty() || name.isEmpty()) {
                     skipped++;
@@ -95,7 +96,7 @@ public final class Cookies {
         }
         LOG.info("Loaded " + cookies.size() + " cookies from " + file
                 + " (" + youtube + " YouTube/Google, " + skipped + " skipped)");
-        return new Loaded(List.copyOf(cookies), youtube);
+        return new Loaded(Collections.unmodifiableList(new ArrayList<>(cookies)), youtube);
     }
 
     public static CookieJar cookieJar(final Path file) throws IOException {

@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -71,10 +73,10 @@ public final class YouTubeClient {
         if (input == null) {
             return null;
         }
-        String value = input.strip();
+        String value = input.trim();
         if ((value.startsWith("\"") && value.endsWith("\""))
                 || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.substring(1, value.length() - 1).strip();
+            value = value.substring(1, value.length() - 1).trim();
         }
         if (VIDEO_ID.matcher(value).matches()) {
             return value;
@@ -105,7 +107,7 @@ public final class YouTubeClient {
         if (path.equals("/watch") || path.equals("/watch/")) {
             return queryParam(uri.getRawQuery(), "v");
         }
-        for (final String prefix : List.of("/shorts/", "/live/", "/embed/", "/v/", "/e/")) {
+        for (final String prefix : Arrays.asList("/shorts/", "/live/", "/embed/", "/v/", "/e/")) {
             if (path.startsWith(prefix)) {
                 final String candidate = firstPathId(path.substring(prefix.length() - 1));
                 if (candidate != null) {
@@ -341,12 +343,12 @@ public final class YouTubeClient {
 
     private static String streamUrl(final org.schabi.newpipe.extractor.stream.Stream stream) {
         final String content = stream.isUrl() ? stream.getContent() : null;
-        if (content != null && !content.isBlank()) {
+        if (content != null && !content.trim().isEmpty()) {
             return content;
         }
         @SuppressWarnings("deprecation")
         final String deprecated = stream.getUrl();
-        return deprecated == null || deprecated.isBlank() ? null : deprecated;
+        return deprecated == null || deprecated.trim().isEmpty() ? null : deprecated;
     }
 
     private static String firstPathId(final String path) {
@@ -412,7 +414,7 @@ public final class YouTubeClient {
     }
 
     private static <T> List<T> safe(final List<T> list) {
-        return list == null ? List.of() : list;
+        return list == null ? Collections.emptyList() : list;
     }
 
     @SafeVarargs

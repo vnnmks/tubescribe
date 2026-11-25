@@ -7,7 +7,7 @@ public record SubtitleCue(double start, double end, String text) implements Comp
     public SubtitleCue {
         start = Math.max(0, start);
         end = Math.max(start, end);
-        text = text == null ? "" : text.strip().replaceAll("\\s+", " ");
+        text = text == null ? "" : text.trim().replaceAll("\\s+", " ");
     }
 
     public double duration() {

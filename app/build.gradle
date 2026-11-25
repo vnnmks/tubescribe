@@ -18,8 +18,8 @@ android {
         applicationId 'dev.tubescribe'
         minSdk 26
         targetSdk 35
-        versionCode 17
-        versionName '0.5.3'
+        versionCode 18
+        versionName '0.5.4'
     }
 
     signingConfigs {
@@ -44,6 +44,10 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+        // NewPipeExtractor v0.26.5 uses Java 11 APIs (URLEncoder/URLDecoder
+        // with Charset, Collectors.toUnmodifiableList) that only exist on
+        // Android 13+; its README requires the nio desugaring below minSdk 33.
+        coreLibraryDesugaringEnabled true
     }
     kotlinOptions {
         jvmTarget = '17'
@@ -59,6 +63,8 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.5'
+
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.activity:activity-compose:1.9.3'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7'
